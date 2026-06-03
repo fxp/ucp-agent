@@ -8,9 +8,16 @@
     "binding": "ASSETS"
   },
   "services": [
-    { "binding": "MOCK", "service": "ucp-mock" }
+    { "binding": "MOCK", "service": "ucp-mock" },
+    { "binding": "SUPPLY_CHAIN", "service": "supply-chain-mock" }
+  ],
+  "kv_namespaces": [
+    { "binding": "WELFARE_KV", "id": "PLACEHOLDER_RUN_deploy_sh" }
   ],
   "vars": {
-    "MERCHANT_URL": "https://ucp-mock.fxp007.workers.dev"
+    "MERCHANT_URL": "https://ucp-mock.fxp007.workers.dev",
+    "SLACK_OPS_CHANNEL": "#vending-ops",
+    "SLACK_BOT_TOKEN": "",
+    "AGENT_SECRET": "dev-agent-secret-change-in-prod"
   }
 }

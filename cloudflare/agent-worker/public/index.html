@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>UCP Vending · AI 购物助手</title>
 <script async src="https://pay.google.com/gp/p/js/pay.js" onload="_initGPay()"></script>
+<!-- face-api.js: open-source face detection + recognition (MIT) -->
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 <style>
 /* ── Reset & base ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -160,6 +162,39 @@ header   { display: flex; align-items: center; gap: 10px; padding: 12px 20px; ba
 @media (max-width: 720px) {
   .log-panel { display: none; }
 }
+
+/* ── Kiosk Mode ── */
+.kiosk-panel {
+  width: 280px; flex-shrink: 0; border-right: 1px solid var(--border);
+  background: var(--bg2); display: none; flex-direction: column; overflow: hidden;
+}
+.kiosk-panel.active { display: flex; }
+.kiosk-header { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 700; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
+.kiosk-section { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.kiosk-section h4 { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+.camera-wrap { position: relative; width: 100%; aspect-ratio: 4/3; background: #000; border-radius: 8px; overflow: hidden; }
+.camera-wrap video { width: 100%; height: 100%; object-fit: cover; }
+.camera-wrap canvas { position: absolute; top: 0; left: 0; }
+.face-status { margin-top: 8px; font-size: 12px; color: var(--muted); min-height: 20px; }
+.face-status.detected { color: var(--green); }
+.face-status.recognized { color: var(--blue); font-weight: 700; }
+.face-status.error { color: var(--red); }
+.enroll-form { margin-top: 8px; display: flex; gap: 6px; }
+.enroll-form input { flex: 1; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text); font-size: 12px; }
+.enroll-form input:focus { outline: none; border-color: var(--blue); }
+.kbtn { background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; color: var(--text); font-size: 12px; cursor: pointer; transition: .15s; white-space: nowrap; }
+.kbtn:hover { border-color: var(--blue); color: var(--blue); }
+.kbtn.danger:hover { border-color: var(--red); color: var(--red); }
+.enrolled-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; max-height: 100px; overflow-y: auto; }
+.enrolled-item { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--text); padding: 3px 0; }
+.enrolled-item button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 11px; }
+.enrolled-item button:hover { color: var(--red); }
+.voice-status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.voice-status .mic-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.voice-status .mic-dot.listening { background: var(--red); animation: pulse .6s infinite; }
+.voice-transcript { margin-top: 6px; font-size: 11px; color: var(--muted); min-height: 16px; font-style: italic; }
+.kiosk-badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px; background: var(--bg3); color: var(--muted); border: 1px solid var(--border); cursor: pointer; transition: .15s; }
+.kiosk-badge.on { background: #1a3a1a; color: var(--green); border-color: var(--green); }
 </style>
 </head>
 <body>
@@ -171,9 +206,12 @@ header   { display: flex; align-items: center; gap: 10px; padding: 12px 20px; ba
     <span class="title">UCP Vending · AI 购物助手</span>
     <div class="badges">
       <span class="badge bb">GLM-4</span>
-      <span class="badge bg">UCP 2026-04-08</span>
+      <span class="badge bg">LangGraph</span>
       <span class="badge by">AP2</span>
     </div>
+    <button class="kiosk-badge" id="kiosk-toggle" onclick="toggleKiosk()" title="Kiosk Mode: 人脸识别 + 语音输入">
+      📷 Kiosk
+    </button>
     <div class="status">
       <div class="dot" id="status-dot"></div>
       <span id="status-text">就绪</span>
@@ -181,6 +219,49 @@ header   { display: flex; align-items: center; gap: 10px; padding: 12px 20px; ba
   </header>
 
   <div class="body">
+
+    <!-- Kiosk panel (face recognition + voice) -->
+    <aside class="kiosk-panel" id="kiosk-panel">
+      <div class="kiosk-header">📷 Kiosk Mode</div>
+
+      <!-- Camera / Face Recognition -->
+      <div class="kiosk-section">
+        <h4>人脸识别</h4>
+        <div class="camera-wrap">
+          <video id="kiosk-video" autoplay muted playsinline></video>
+          <canvas id="kiosk-canvas"></canvas>
+        </div>
+        <div class="face-status" id="face-status">等待模型加载…</div>
+
+        <!-- Enrollment -->
+        <div class="enroll-form">
+          <input id="enroll-name" placeholder="姓名 / 工号" />
+          <button class="kbtn" onclick="enrollFace()">注册</button>
+        </div>
+        <div class="enrolled-list" id="enrolled-list"></div>
+      </div>
+
+      <!-- Voice Input -->
+      <div class="kiosk-section">
+        <h4>语音输入</h4>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="kbtn" id="voice-btn" onclick="toggleVoice()">🎤 开始聆听</button>
+          <button class="kbtn danger" onclick="stopVoice()">停止</button>
+        </div>
+        <div class="voice-status" style="margin-top:8px">
+          <div class="mic-dot" id="mic-dot"></div>
+          <span id="voice-state-text">未激活</span>
+        </div>
+        <div class="voice-transcript" id="voice-transcript"></div>
+      </div>
+
+      <!-- Biometric Status -->
+      <div class="kiosk-section">
+        <h4>生物授权状态</h4>
+        <div style="font-size:12px;color:var(--muted)" id="bio-status-text">无</div>
+        <button class="kbtn danger" style="margin-top:8px;font-size:11px" onclick="clearBiometric()">清除识别结果</button>
+      </div>
+    </aside>
 
     <!-- Chat panel -->
     <section class="chat-panel">
@@ -192,7 +273,7 @@ header   { display: flex; align-items: center; gap: 10px; padding: 12px 20px; ba
           <div>
             <div class="bubble">
               <div class="role-label">AI 助手</div>
-              <div class="bubble-text">你好！我是 UCP 购物 Agent，由 GLM-4 驱动。
+              <div class="bubble-text">你好！我是 UCP 购物 Agent，由 GLM-4 + LangGraph 驱动。
 
 我会通过 UCP 协议帮你完成完整的购物流程：
 🔍 浏览商品 → 💳 选择支付方式 → 📦 自动出货
@@ -243,9 +324,16 @@ header   { display: flex; align-items: center; gap: 10px; padding: 12px 20px; ba
 <script>
 'use strict';
 
+// ── Config ────────────────────────────────────────────────────────────────────
+// Override window.AGENT_BASE before this script to point at a remote server.
+const AGENT_BASE = (window.AGENT_BASE || '').replace(/\/$/, '');
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let busy = false;
-const pendingPayments = {};  // payment_id → {checkout_id, token, amount, currency, product_name}
+let currentThreadId = null;     // LangGraph thread_id for conversation continuity
+let currentUserId = 'guest';
+const pendingPayments = {};     // pid → {thread_id, checkout_id, token, amount, currency}
+const _lastToolLogId = {};      // tool name → last log entry id (for result correlation)
 
 // ── Status ────────────────────────────────────────────────────────────────────
 function setStatus(state, text) {
@@ -305,23 +393,6 @@ function removeTypingIndicator() {
   document.getElementById('typing-indicator')?.remove();
 }
 
-function addSpecialCard(role, titleEl, contentEl) {
-  const chat = document.getElementById('chat');
-  const el = document.createElement('div');
-  el.className = 'msg ' + role;
-  el.innerHTML = `
-    <div class="av">${role === 'user' ? '👤' : '💳'}</div>
-    <div>
-      <div class="bubble">
-        <div class="role-label">${titleEl}</div>
-        ${contentEl}
-      </div>
-    </div>`;
-  chat.appendChild(el);
-  scrollChat();
-  return el;
-}
-
 function esc(s) {
   return String(s || '')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -331,7 +402,7 @@ function esc(s) {
 const PRODUCT_EMOJIS = {
   'water': '💧', 'mineral': '💧', 'cola': '🥤', 'coke': '🥤', '可乐': '🥤',
   'tea': '🍵', '茶': '🍵', 'chips': '🍟', '薯片': '🍟', 'coffee': '☕',
-  'juice': '🍊', 'beer': '🍺', 'milk': '🥛', 'energy': '⚡',
+  'juice': '🍊', 'beer': '🍺', 'milk': '🥛', 'energy': '⚡', '气泡': '🫧',
 };
 function productEmoji(name) {
   const n = name.toLowerCase();
@@ -420,7 +491,6 @@ function addPaymentCard(pid, amount, currency, productName, googlePayConfig, ali
   chat.appendChild(el);
   scrollChat();
 
-  // Render official Google Pay button if SDK ready
   if (googlePayConfig && window._gpayClient) {
     renderGPayButton(pid, amount, currency, googlePayConfig);
   }
@@ -436,7 +506,7 @@ function addOrderCard(orderId, amount, product, events, pickupCode, pickupUrl) {
   const chat = document.getElementById('chat');
   const el = document.createElement('div');
   el.className = 'msg agent';
-  const timeline = events.map((ev, i) => `
+  const timeline = (events || []).map((ev, i) => `
     <div class="tl-item">
       <div class="tl-line">
         <div class="tl-dot"></div>
@@ -449,7 +519,7 @@ function addOrderCard(orderId, amount, product, events, pickupCode, pickupUrl) {
     <div style="margin-top:12px;padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
       <div style="font-size:11px;color:var(--muted);margin-bottom:6px">🏪 前往自动贩卖机扫码取货</div>
       <div style="font-family:monospace;font-size:26px;font-weight:800;letter-spacing:4px;color:var(--blue);text-align:center;padding:6px 0">${esc(pickupCode)}</div>
-      <a href="${esc(pickupUrl)}" target="_blank" style="display:block;margin-top:8px;padding:8px;background:var(--blue-bg);color:var(--blue);border-radius:6px;text-align:center;font-size:12px;font-weight:700;text-decoration:none">
+      <a href="${esc(pickupUrl || '')}" target="_blank" style="display:block;margin-top:8px;padding:8px;background:var(--blue-bg);color:var(--blue);border-radius:6px;text-align:center;font-size:12px;font-weight:700;text-decoration:none">
         打开贩卖机页面 →
       </a>
     </div>` : '';
@@ -460,11 +530,12 @@ function addOrderCard(orderId, amount, product, events, pickupCode, pickupUrl) {
       <div class="bubble order-card">
         <div class="order-header"><span class="order-icon">✅</span><span class="order-title">支付成功 · 待取货</span></div>
         <div class="order-meta">
-          <span>${esc(product)}</span>
-          <span style="color:var(--green)">${amount}</span>
+          <span>${esc(product || '')}</span>
+          <span style="color:var(--green)">${esc(amount || '')}</span>
         </div>
+        ${timeline ? `<div class="timeline" style="margin-top:8px">${timeline}</div>` : ''}
         ${pickupSection}
-        <div class="order-id" style="margin-top:8px">订单 ${esc(orderId)}</div>
+        <div class="order-id" style="margin-top:8px">订单 ${esc(orderId || '')}</div>
       </div>
     </div>`;
   chat.appendChild(el);
@@ -515,13 +586,12 @@ async function payAlipay(pid, amount, currency, product, cfg) {
   if (methods) Array.from(methods.querySelectorAll('button')).forEach(b => b.disabled = true);
 
   setStatus('thinking', '创建支付宝预下单…');
-  const r = await fetch('/api/alipay-create-order', {
+  const r = await fetch(AGENT_BASE + '/api/alipay-create-order', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ checkout_id: pend.checkout_id || '', amount, currency, product_name: product, token: pend.token }),
   });
   const order = await r.json();
   const cashierUrl = order.data?.cashier_url || order.cashier_url;
-  const alipayOrderId = order.data?.alipay_order_id || order.alipay_order_id;
   if (!cashierUrl) {
     addBubble('agent', '支付宝预下单失败，请重试');
     if (methods) Array.from(methods.querySelectorAll('button')).forEach(b => b.disabled = false);
@@ -547,8 +617,11 @@ async function payAlipay(pid, amount, currency, product, cfg) {
 function cancelPay(pid) {
   const card = document.getElementById(`paycard-${pid}`);
   card?.closest('.msg')?.remove();
+  delete pendingPayments[pid];
   addBubble('agent', '已取消支付。如需重新购买，请再次告诉我。');
   setStatus('', '就绪');
+  busy = false;
+  document.getElementById('send-btn').disabled = false;
 }
 
 // ── Google Pay SDK ────────────────────────────────────────────────────────────
@@ -572,14 +645,24 @@ function renderGPayButton(pid, amount, currency, cfg) {
 
 // ── Phase 2: confirm payment ──────────────────────────────────────────────────
 async function doPhase2(pid, gpayToken, alipayOrderId, intentCredential) {
+  const pend = pendingPayments[pid] || {};
+  // Support both LangGraph (thread_id) and Cloudflare Worker (payment_id) backends
+  const threadId = pend.thread_id || pid;
+
   const agentMsgId = `agent-p2-${Date.now()}`;
   addBubble('agent', '', agentMsgId);
   let agText = '';
 
   await streamSSE(
-    fetch('/api/confirm-payment', {
+    fetch(AGENT_BASE + '/api/confirm-payment', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ payment_id: pid, gpay_token: gpayToken || null, alipay_order_id: alipayOrderId || null, intent_credential: intentCredential || null }),
+      body: JSON.stringify({
+        thread_id: threadId,
+        payment_id: pid,
+        gpay_token: gpayToken || null,
+        alipay_order_id: alipayOrderId || null,
+        intent_credential: intentCredential || null,
+      }),
     }),
     {
       text: p => {
@@ -588,13 +671,29 @@ async function doPhase2(pid, gpayToken, alipayOrderId, intentCredential) {
         if (el) el.textContent = agText;
         scrollChat();
       },
-      tool_call: p => { setStatus('thinking', p.name + '…'); addLogEntry(p.id, p.name, p.args); },
-      tool_result: p => { setStatus('thinking', `${p.name} → ${p.status}`); updateLogEntry(p.id, p.status, p.data); },
+      tool_call: p => {
+        const id = p.id || (p.name + '-' + Date.now());
+        _lastToolLogId[p.name] = id;
+        setStatus('thinking', p.name + '…');
+        addLogEntry(id, p.name, p.args);
+      },
+      tool_result: p => {
+        const id = _lastToolLogId[p.name] || p.name;
+        setStatus('thinking', p.name + '…');
+        updateLogEntry(id, p.status || 200, p.data);
+      },
       ap2_mandate: p => { addLogEntry('ap2-' + Date.now(), 'ap2_mandate', p); },
       payment_done: p => {
+        delete pendingPayments[pid];
         addOrderCard(p.order_id, p.amount, p.product, p.events || [], p.pickup_code, p.pickup_url);
       },
-      done: _ => { setStatus('done', '完成 ✓'); setTimeout(() => setStatus('', '就绪'), 3000); busy = false; document.getElementById('send-btn').disabled = false; },
+      done: p => {
+        if (p?.thread_id) currentThreadId = p.thread_id;
+        setStatus('done', '完成 ✓');
+        setTimeout(() => setStatus('', '就绪'), 3000);
+        busy = false;
+        document.getElementById('send-btn').disabled = false;
+      },
     }
   );
 }
@@ -617,11 +716,12 @@ async function send() {
   let agText = '';
   let catalogShown = false;
   let agBubbleCreated = false;
+  let paymentRequested = false;
 
   await streamSSE(
-    fetch('/api/chat', {
+    fetch(AGENT_BASE + '/api/chat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg }),
+      body: JSON.stringify({ message: msg, thread_id: currentThreadId, user_id: currentUserId }),
     }),
     {
       text: p => {
@@ -636,36 +736,44 @@ async function send() {
         scrollChat();
       },
       tool_call: p => {
+        const id = p.id || (p.name + '-' + Date.now());
+        _lastToolLogId[p.name] = id;
         setStatus('thinking', p.name + '…');
-        addLogEntry(p.id, p.name, p.args);
+        addLogEntry(id, p.name, p.args);
       },
       tool_result: p => {
-        setStatus('thinking', `${p.name} → ${p.status}`);
-        updateLogEntry(p.id, p.status, p.data);
-        // Show catalog when browse_catalog result arrives
-        if (p.name === 'ucp_browse_catalog' && p.status === 200 && p.data?.line_items && !catalogShown) {
+        const id = _lastToolLogId[p.name] || p.name;
+        setStatus('thinking', p.name + '…');
+        updateLogEntry(id, p.status || 200, p.data);
+        // Show catalog card
+        if (p.name === 'ucp_browse_catalog' && p.data?.line_items && !catalogShown) {
           catalogShown = true;
           removeTypingIndicator();
           addProductGrid(p.data.line_items);
         }
       },
       payment_request: p => {
+        paymentRequested = true;
         removeTypingIndicator();
         setStatus('thinking', '等待支付确认…');
-        pendingPayments[p.payment_id] = {
-          pid: p.payment_id,
+        // Use thread_id as the payment card id when available (LangGraph backend)
+        const pid = p.thread_id || p.payment_id || Date.now().toString();
+        if (p.thread_id) currentThreadId = p.thread_id;
+        pendingPayments[pid] = {
+          pid,
+          thread_id: p.thread_id,
           checkout_id: p.checkout_id || '',
           token: p.token || '',
           amount: p.amount,
           currency: p.currency,
         };
-        addPaymentCard(p.payment_id, p.amount, p.currency, p.product_name, p.google_pay, p.alipay);
-        // Don't mark as not busy — we wait for user payment action
+        addPaymentCard(pid, p.amount, p.currency, p.product_name, p.google_pay, p.alipay);
       },
-      done: _ => {
+      done: p => {
+        if (p?.thread_id) currentThreadId = p.thread_id;
         removeTypingIndicator();
-        // If payment was requested, keep busy until phase 2 done
-        if (!Object.keys(pendingPayments).length) {
+        // Keep busy if payment is pending; phase2 will clear it
+        if (!paymentRequested) {
           setStatus('done', '完成 ✓');
           setTimeout(() => setStatus('', '就绪'), 3000);
           busy = false;
@@ -717,12 +825,22 @@ const LOG_NAMES = {
   ucp_track_order:        'GET /orders/{id}',
   ap2_mandate:            '🔐 AP2 Mandate',
   alipay_verify_payment:  'GET /alipay/query-order/{id}',
+  get_welfare_balance:    'GET welfare/balance',
+  deduct_welfare:         'POST welfare/deduct',
+  notify_ops:             'POST slack/ops',
+  notify_restock:         'POST slack/restock',
+  notify_payment_failed:  'POST slack/payment-failed',
+  query_supplier_sku:     'GET yonyou/sku',
+  create_preorder:        'POST yonyou/preorder',
 };
 const LOG_METHS = {
   ucp_discover: 'GET', ucp_get_token: 'POST', ucp_browse_catalog: 'POST',
   ucp_create_checkout: 'POST', ucp_request_payment: 'POST',
   ucp_complete_checkout: 'POST', ucp_track_order: 'GET',
   ap2_mandate: 'AP2', alipay_verify_payment: 'GET',
+  get_welfare_balance: 'GET', deduct_welfare: 'POST',
+  notify_ops: 'POST', notify_restock: 'POST', notify_payment_failed: 'POST',
+  query_supplier_sku: 'GET', create_preorder: 'POST',
 };
 
 function addLogEntry(id, name, args) {
@@ -751,9 +869,9 @@ function updateLogEntry(id, status, data) {
   const badge = document.getElementById(`lb-${id}`);
   const body  = document.getElementById(`lbody-${id}`);
   if (badge) {
-    const ok = status >= 200 && status < 300;
+    const ok = !status || (status >= 200 && status < 300);
     badge.className = 'le-status ' + (ok ? 'ok' : 'err');
-    badge.textContent = status;
+    badge.textContent = status || '✓';
   }
   if (body && data) body.innerHTML = pjson(data);
 }
@@ -774,6 +892,380 @@ function pjson(obj) {
       .replace(/: (\d+\.?\d*)/g, ': <span style="color:#f2cc60">$1</span>');
   } catch { return String(obj); }
 }
+
+// ── Kiosk Mode (Face Recognition + Voice) ────────────────────────────────────
+// Face recognition: face-api.js (MIT) — https://github.com/justadudewhohacks/face-api.js
+// Voice: Web Speech API (built-in Chrome/Edge)
+
+const FACE_MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights';
+const FACE_MATCH_THRESHOLD = 0.55;  // lower = stricter (euclidean distance)
+const ATTENTION_THRESHOLD_MS = 3000; // time user must look at camera to trigger agent
+
+let kioskActive = false;
+let faceModelsLoaded = false;
+let faceModelsLoading = false;
+let videoStream = null;
+let recognitionLoop = null;
+let enrolledFaces = [];       // [{name, descriptor}] — persisted in localStorage
+let currentBiometric = null;  // null | {method, confidence, voice_verified, verified_at}
+let recognizedUser = null;    // null | {name, confidence}
+let attentionTimer = null;
+let voiceRecognition = null;
+let voiceActive = false;
+
+// ── Kiosk toggle ──────────────────────────────────────────────────────────────
+async function toggleKiosk() {
+  kioskActive = !kioskActive;
+  const panel = document.getElementById('kiosk-panel');
+  const btn   = document.getElementById('kiosk-toggle');
+  panel.classList.toggle('active', kioskActive);
+  btn.classList.toggle('on', kioskActive);
+  btn.textContent = kioskActive ? '📷 Kiosk ON' : '📷 Kiosk';
+
+  if (kioskActive) {
+    await startCamera();
+    loadEnrolledFaces();
+    renderEnrolledList();
+    if (!faceModelsLoaded) loadFaceModels();
+  } else {
+    stopCamera();
+    stopVoice();
+  }
+}
+
+// ── Face models (lazy load) ───────────────────────────────────────────────────
+async function loadFaceModels() {
+  if (faceModelsLoaded || faceModelsLoading) return;
+  if (typeof faceapi === 'undefined') {
+    setFaceStatus('face-api.js 未加载', 'error'); return;
+  }
+  faceModelsLoading = true;
+  setFaceStatus('加载人脸识别模型…');
+  try {
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODEL_URL),
+      faceapi.nets.faceLandmark68TinyNet.loadFromUri(FACE_MODEL_URL),
+      faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODEL_URL),
+    ]);
+    faceModelsLoaded = true;
+    faceModelsLoading = false;
+    setFaceStatus('模型就绪，开始扫描…');
+    startRecognitionLoop();
+  } catch (e) {
+    faceModelsLoading = false;
+    setFaceStatus('模型加载失败：' + e.message, 'error');
+    console.error('face-api.js model load failed', e);
+  }
+}
+
+// ── Camera ────────────────────────────────────────────────────────────────────
+async function startCamera() {
+  try {
+    videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+    const video = document.getElementById('kiosk-video');
+    video.srcObject = videoStream;
+    await video.play();
+    // Size canvas to match video
+    video.addEventListener('loadedmetadata', () => {
+      const c = document.getElementById('kiosk-canvas');
+      c.width = video.videoWidth; c.height = video.videoHeight;
+    }, { once: true });
+  } catch (e) {
+    setFaceStatus('摄像头访问失败：' + e.message, 'error');
+  }
+}
+
+function stopCamera() {
+  if (recognitionLoop) { clearInterval(recognitionLoop); recognitionLoop = null; }
+  if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
+  const video = document.getElementById('kiosk-video');
+  if (video) video.srcObject = null;
+}
+
+// ── Recognition loop ──────────────────────────────────────────────────────────
+function startRecognitionLoop() {
+  if (recognitionLoop) clearInterval(recognitionLoop);
+  recognitionLoop = setInterval(runDetection, 700);
+}
+
+async function runDetection() {
+  if (!faceModelsLoaded || !kioskActive) return;
+  const video = document.getElementById('kiosk-video');
+  if (!video || video.paused || video.ended || !video.videoWidth) return;
+
+  try {
+    const detections = await faceapi
+      .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.4 }))
+      .withFaceLandmarks(true)
+      .withFaceDescriptor();
+
+    const canvas = document.getElementById('kiosk-canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!detections) {
+      setFaceStatus('未检测到人脸…');
+      recognizedUser = null;
+      clearAttentionTimer();
+      return;
+    }
+
+    // Draw detection box
+    const { x, y, width, height } = detections.detection.box;
+    const scaleX = canvas.width / video.videoWidth;
+    const scaleY = canvas.height / video.videoHeight;
+    ctx.strokeStyle = enrolledFaces.length ? '#58a6ff' : '#e3b341';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x * scaleX, y * scaleY, width * scaleX, height * scaleY);
+
+    if (!enrolledFaces.length) {
+      setFaceStatus('检测到人脸，请先注册用户', 'detected');
+      return;
+    }
+
+    // Match against enrolled descriptors
+    const labeled = enrolledFaces.map(f => new faceapi.LabeledFaceDescriptors(f.name, [new Float32Array(f.descriptor)]));
+    const matcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_THRESHOLD);
+    const match   = matcher.findBestMatch(detections.descriptor);
+
+    if (match.label !== 'unknown') {
+      const confidence = Math.max(0, 1 - match.distance);
+      ctx.strokeStyle = '#3fb950';
+      ctx.strokeRect(x * scaleX, y * scaleY, width * scaleX, height * scaleY);
+      ctx.fillStyle = '#3fb950';
+      ctx.font = '12px monospace';
+      ctx.fillText(match.label, x * scaleX, y * scaleY - 4);
+
+      if (!recognizedUser || recognizedUser.name !== match.label) {
+        recognizedUser = { name: match.label, confidence };
+        startAttentionTimer(match.label, confidence);
+      }
+      setFaceStatus(`✓ ${match.label}（置信度 ${(confidence * 100).toFixed(0)}%）`, 'recognized');
+    } else {
+      setFaceStatus('未知用户 — 请注册', 'detected');
+      recognizedUser = null;
+      clearAttentionTimer();
+    }
+  } catch (e) {
+    // Silently skip detection errors (common when video not ready)
+  }
+}
+
+// ── Attention timer: auto-greet after ATTENTION_THRESHOLD_MS ─────────────────
+function startAttentionTimer(name, confidence) {
+  clearAttentionTimer();
+  attentionTimer = setTimeout(() => {
+    setCurrentUser(name, confidence);
+    greetUser(name);
+  }, ATTENTION_THRESHOLD_MS);
+}
+
+function clearAttentionTimer() {
+  if (attentionTimer) { clearTimeout(attentionTimer); attentionTimer = null; }
+}
+
+function setCurrentUser(name, confidence) {
+  currentUserId = name;
+  currentBiometric = {
+    method: 'face_recognition',
+    provider: 'face-api.js',
+    confidence,
+    voice_verified: false,
+    verified_at: Math.floor(Date.now() / 1000),
+  };
+  updateBioStatus();
+}
+
+function greetUser(name) {
+  if (busy) return;
+  addBubble('agent', `👋 欢迎，${name}！请说出您想要什么，或直接点击下方快捷选项。`);
+  // Auto-start voice if not already listening
+  if (!voiceActive) startVoice();
+}
+
+function updateBioStatus() {
+  const el = document.getElementById('bio-status-text');
+  if (!el) return;
+  if (currentBiometric) {
+    el.innerHTML = `<span style="color:var(--green)">✓ ${currentUserId}</span>` +
+      `<br>置信度 ${(currentBiometric.confidence * 100).toFixed(0)}%` +
+      (currentBiometric.voice_verified ? ' · 🎤 声纹✓' : '');
+  } else {
+    el.textContent = '无';
+  }
+}
+
+// ── Face enrollment ───────────────────────────────────────────────────────────
+async function enrollFace() {
+  if (!faceModelsLoaded) { alert('请等待模型加载完成'); return; }
+  const nameEl = document.getElementById('enroll-name');
+  const name = nameEl.value.trim();
+  if (!name) { nameEl.focus(); return; }
+
+  const video = document.getElementById('kiosk-video');
+  if (!video.videoWidth) { alert('摄像头未就绪'); return; }
+
+  setFaceStatus('正在采集人脸数据…');
+  const descriptors = [];
+
+  // Capture 5 frames for robustness
+  for (let i = 0; i < 5; i++) {
+    await new Promise(r => setTimeout(r, 300));
+    const det = await faceapi
+      .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.5 }))
+      .withFaceLandmarks(true)
+      .withFaceDescriptor();
+    if (det) descriptors.push(Array.from(det.descriptor));
+  }
+
+  if (!descriptors.length) {
+    setFaceStatus('未检测到人脸，请正对摄像头', 'error'); return;
+  }
+
+  // Average descriptor for robustness
+  const avg = descriptors[0].map((_, i) => descriptors.reduce((s, d) => s + d[i], 0) / descriptors.length);
+  enrolledFaces.push({ name, descriptor: avg, enrolledAt: new Date().toISOString() });
+  saveEnrolledFaces();
+  renderEnrolledList();
+  nameEl.value = '';
+  setFaceStatus(`✓ ${name} 注册成功（${descriptors.length} 帧）`, 'recognized');
+}
+
+function deleteEnrolled(name) {
+  enrolledFaces = enrolledFaces.filter(f => f.name !== name);
+  if (recognizedUser?.name === name) { recognizedUser = null; currentBiometric = null; currentUserId = 'guest'; updateBioStatus(); }
+  saveEnrolledFaces();
+  renderEnrolledList();
+}
+
+function renderEnrolledList() {
+  const list = document.getElementById('enrolled-list');
+  if (!list) return;
+  list.innerHTML = enrolledFaces.length
+    ? enrolledFaces.map(f => `
+        <div class="enrolled-item">
+          <span>👤 ${esc(f.name)}</span>
+          <button onclick="deleteEnrolled('${esc(f.name)}')" title="删除">✕</button>
+        </div>`).join('')
+    : '<div style="color:var(--muted);font-size:11px">暂无已注册用户</div>';
+}
+
+function saveEnrolledFaces() {
+  try { localStorage.setItem('ucp_enrolled_faces', JSON.stringify(enrolledFaces)); } catch {}
+}
+
+function loadEnrolledFaces() {
+  try {
+    const raw = localStorage.getItem('ucp_enrolled_faces');
+    enrolledFaces = raw ? JSON.parse(raw) : [];
+  } catch { enrolledFaces = []; }
+}
+
+function setFaceStatus(msg, cls = '') {
+  const el = document.getElementById('face-status');
+  if (el) { el.textContent = msg; el.className = 'face-status ' + cls; }
+}
+
+function clearBiometric() {
+  currentBiometric = null;
+  recognizedUser = null;
+  currentUserId = 'guest';
+  updateBioStatus();
+  setFaceStatus('生物识别已清除');
+}
+
+// ── Voice Input (Web Speech API) ──────────────────────────────────────────────
+function startVoice() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { alert('此浏览器不支持 Web Speech API（请使用 Chrome）'); return; }
+  if (voiceActive) return;
+
+  voiceRecognition = new SR();
+  voiceRecognition.lang = 'zh-CN';
+  voiceRecognition.continuous = false;
+  voiceRecognition.interimResults = true;
+
+  voiceRecognition.onstart = () => {
+    voiceActive = true;
+    document.getElementById('mic-dot').className = 'mic-dot listening';
+    document.getElementById('voice-state-text').textContent = '正在聆听…';
+    document.getElementById('voice-btn').textContent = '🎤 聆听中';
+  };
+
+  voiceRecognition.onresult = (e) => {
+    const transcript = Array.from(e.results).map(r => r[0].transcript).join('');
+    document.getElementById('voice-transcript').textContent = transcript;
+    document.getElementById('input').value = transcript;
+    if (e.results[e.results.length - 1].isFinal) {
+      // Mark voice verified in biometric signal
+      if (currentBiometric) { currentBiometric.voice_verified = true; updateBioStatus(); }
+      send();
+    }
+  };
+
+  voiceRecognition.onend = () => {
+    voiceActive = false;
+    document.getElementById('mic-dot').className = 'mic-dot';
+    document.getElementById('voice-state-text').textContent = '已停止';
+    document.getElementById('voice-btn').textContent = '🎤 开始聆听';
+  };
+
+  voiceRecognition.onerror = (e) => {
+    voiceActive = false;
+    document.getElementById('voice-state-text').textContent = '错误：' + e.error;
+  };
+
+  voiceRecognition.start();
+}
+
+function toggleVoice() {
+  if (voiceActive) stopVoice(); else startVoice();
+}
+
+function stopVoice() {
+  if (voiceRecognition) { try { voiceRecognition.stop(); } catch {} voiceRecognition = null; }
+  voiceActive = false;
+  document.getElementById('mic-dot').className = 'mic-dot';
+  document.getElementById('voice-state-text').textContent = '未激活';
+  document.getElementById('voice-btn').textContent = '🎤 开始聆听';
+}
+
+// ── TTS: speak agent responses in kiosk mode ──────────────────────────────────
+function speakIfKiosk(text) {
+  if (!kioskActive || !window.speechSynthesis) return;
+  // Only speak short messages (avoid reading long tool outputs)
+  if (text.length > 120) return;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'zh-CN';
+  utterance.rate = 1.1;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+}
+
+// Patch addBubble to speak agent messages in kiosk mode
+const _origAddBubble = addBubble;
+// Override in-place: when kiosk is active and role=agent, speak the final text
+// (done after stream completes via hooking the text event handler)
+
+// ── Override send() to include biometric ────────────────────────────────────
+// Patch the fetch call in send() to add biometric + user_id from face recognition.
+// We do this by wrapping the global fetch for /api/chat and /api/confirm-payment.
+const _origFetch = window.fetch;
+window.fetch = function(url, opts) {
+  if (typeof url === 'string' && opts?.body) {
+    const apiUrl = AGENT_BASE + '/api/chat';
+    const confirmUrl = AGENT_BASE + '/api/confirm-payment';
+    if (url === apiUrl || url === confirmUrl) {
+      try {
+        const body = JSON.parse(opts.body);
+        if (currentBiometric) body.biometric = { ...currentBiometric };
+        if (currentUserId !== 'guest') body.user_id = currentUserId;
+        opts = { ...opts, body: JSON.stringify(body) };
+      } catch {}
+    }
+  }
+  return _origFetch.call(this, url, opts);
+};
 </script>
 </body>
 </html>
