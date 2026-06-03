@@ -332,6 +332,8 @@ function phase2Stream(
           ctrl.enqueue(sseEnc("done", {})); ctrl.close(); return;
         }
 
+        const pickupCode = cdata.pickup_code as string | undefined;
+        const pickupUrl  = cdata.pickup_url  as string | undefined;
         const orderId = cdata.order_id as string;
         if (!orderId) {
           ctrl.enqueue(sseEnc("text", { content: "❌ 未获取到订单ID" }));
@@ -351,9 +353,15 @@ function phase2Stream(
         const eventNames = events.map(e => e.type ?? e.name ?? "");
         const amountStr = `¥${(amount / 100).toFixed(2)}`;
 
-        ctrl.enqueue(sseEnc("payment_done", { order_id: orderId, amount: amountStr, product, events: eventNames }));
+        ctrl.enqueue(sseEnc("payment_done", {
+          order_id: orderId, amount: amountStr, product, events: eventNames,
+          pickup_code: pickupCode, pickup_url: pickupUrl,
+        }));
+        const pickupHint = pickupCode
+          ? `\n\n🏪 **取货码：${pickupCode}**\n请前往自动贩卖机扫码取货。`
+          : "";
         ctrl.enqueue(sseEnc("text", { content:
-          `🎉 购买成功！\n\n商品：${product}\n支付：${amountStr} ${currency}\n订单号：${orderId}\n出货：${eventNames.join(" → ") || "处理中…"}` }));
+          `🎉 购买成功！\n\n商品：${product}\n支付：${amountStr} ${currency}\n订单号：${orderId}${pickupHint}` }));
       } catch (e) {
         console.error("phase2", e);
         ctrl.enqueue(sseEnc("text", { content: "❌ Agent 异常，请重试。" }));
