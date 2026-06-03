@@ -366,6 +366,24 @@ async def run_agent_phase1(user_message: str) -> AsyncGenerator[str, None]:
 
 # ── Phase 2: confirm payment → complete checkout → track order ──────────────────
 
+async def _verify_alipay_payment(token: str, alipay_order_id: str) -> dict:
+    """Server-side Alipay payment verification (安全隔离原则 — never trust frontend callback)."""
+    return await _get(f"{MERCHANT_URL}/alipay/query-order/{alipay_order_id}", token)
+
+
+def _build_ap2_mandate(mandate_type: str, mandate_body: dict) -> str:
+    """Construct AP2 checkout_mandate (mock SD-JWT per ACT/1.0)."""
+    import base64 as _b64, json as _j
+    header = _b64.urlsafe_b64encode(
+        b'{"alg":"ES256","typ":"ap2+sd-jwt","kid":"ucp-agent-v1"}'
+    ).rstrip(b"=").decode()
+    payload = _b64.urlsafe_b64encode(
+        _j.dumps(mandate_body, ensure_ascii=False, sort_keys=True).encode()
+    ).rstrip(b"=").decode()
+    # In production: sign with agent platform private key (ES256)
+    return f"{header}.{payload}.mock_platform_sig"
+
+
 async def run_agent_phase2(payment_id: str, gpay_token: str | None = None,
                             alipay_order_id: str | None = None,
                             intent_credential: str | None = None) -> AsyncGenerator[str, None]:
@@ -384,30 +402,77 @@ async def run_agent_phase2(payment_id: str, gpay_token: str | None = None,
     currency    = pending["currency"]
     product     = pending["product_name"]
 
-    # AP2: construct checkout_mandate (simulated SD-JWT)
-    # In production: platform signs checkout response + user authorization
-    import base64 as _b64m, json as _jm
+    # ── 安全隔离原则：服务端验证支付状态，不依赖前端反馈 ────────────────────────
+    # Per Alipay AI Pay spec: "预下单+结果查询"双阶段验证机制，
+    # 必须通过服务端查询确认最终交易状态，杜绝支付欺诈风险。
+    if alipay_order_id:
+        vid = f"alipay-verify-{uuid.uuid4()}"
+        yield sse("tool_call", {"id": vid, "name": "alipay_verify_payment",
+                                 "args": {"alipay_order_id": alipay_order_id,
+                                          "checkout_id": checkout_id}})
+        verify = await _verify_alipay_payment(token, alipay_order_id)
+        yield sse("tool_result", {"id": vid, "name": "alipay_verify_payment",
+                                   "status": verify["status"], "data": verify["data"]})
+
+        vdata = verify.get("data", {})
+
+        # Cross-check: alipay_order_id must belong to this checkout session
+        if vdata.get("checkout_id") and vdata["checkout_id"] != checkout_id:
+            yield sse("text", {"content": "⚠️ 支付订单与结账会话不匹配，拒绝继续。"})
+            yield sse("done", {})
+            return
+
+        if verify["status"] != 200 or vdata.get("status") != "paid":
+            reason = vdata.get("status", "unknown")
+            yield sse("text", {"content": f"⚠️ 服务端支付验证失败（状态：{reason}），无法完成结账。"})
+            yield sse("done", {})
+            return
+
+        # Use server-returned credential — override any frontend-provided value
+        # (安全隔离原则：服务端凭证比前端 postMessage 更可信)
+        server_credential = vdata.get("intent_credential")
+        if server_credential:
+            intent_credential = server_credential
+
+    # ── AP2 mandate 构造（ACT/1.0 意图授权凭证）─────────────────────────────────
     ap2_mandate = None
+    now_ts = time.time()
+
     if intent_credential:
-        # Alipay path: use intent_credential as the AP2 payment mandate
         mandate_body = {
-            "type": "alipay_intent_credential",
-            "credential": intent_credential,
-            "checkout_id": checkout_id,
-            "issued_by": f"{AGENT_BASE}/profile",
-            "act_version": "ACT/1.0",
+            "type":          "alipay_intent_credential",
+            "act_version":   "ACT/1.0",
+            "credential":    intent_credential,
+            "checkout_id":   checkout_id,
+            "alipay_order_id": alipay_order_id,
+            "amount":        {"value": amount, "currency": currency},
+            "agent_id":      AGENT_PROFILE["id"],
+            "issued_by":     f"{AGENT_BASE}/profile",
+            "iat":           int(now_ts),
+            "exp":           int(now_ts) + 300,
+            "verification":  {
+                "method":    "server_query",
+                "verified_at": int(now_ts),
+            },
         }
-        ap2_mandate = "ap2_sd_jwt." + _b64m.urlsafe_b64encode(
-            _jm.dumps(mandate_body, ensure_ascii=False).encode()
-        ).rstrip(b"=").decode() + ".mock_platform_sig"
-        yield sse("ap2_mandate", {"type": "alipay_intent_credential",
-                                   "mandate_preview": ap2_mandate[:60] + "…"})
+        ap2_mandate = _build_ap2_mandate("alipay_intent_credential", mandate_body)
+        yield sse("ap2_mandate", {
+            "type":     "alipay_intent_credential",
+            "act":      "ACT/1.0",
+            "verified": True,
+            "mandate_preview": ap2_mandate[:72] + "…",
+        })
+
     elif gpay_token:
-        mandate_body = {"type": "google_pay_token", "token_preview": gpay_token[:20],
-                        "checkout_id": checkout_id}
-        ap2_mandate = "ap2_sd_jwt." + _b64m.urlsafe_b64encode(
-            _jm.dumps(mandate_body, ensure_ascii=False).encode()
-        ).rstrip(b"=").decode() + ".mock_platform_sig"
+        mandate_body = {
+            "type":       "google_pay_token",
+            "token_preview": gpay_token[:20] + "…",
+            "checkout_id": checkout_id,
+            "agent_id":   AGENT_PROFILE["id"],
+            "issued_by":  f"{AGENT_BASE}/profile",
+            "iat":        int(now_ts),
+        }
+        ap2_mandate = _build_ap2_mandate("google_pay_token", mandate_body)
 
     yield sse("text", {"content": "✅ 支付已授权，正在完成结账…"})
 
@@ -490,14 +555,27 @@ async def chat(request: Request):
 
 @app.post("/api/alipay-create-order")
 async def alipay_create_order_proxy(request: Request):
-    """Proxy: agent creates Alipay pre-order on behalf of user."""
+    """Proxy: agent creates Alipay pre-order (alipay.trade.precreate) on behalf of user.
+
+    Follows Alipay AI Pay MCP tool pattern:
+    Input:  order_name, merchant_order_id (checkout_id), total_amount
+    Output: pre-order number + cashier_url for user confirmation
+    """
     body = await request.json()
+    # Use checkout_id as merchant_order_id for cross-reference verification
+    checkout_id = body.get("checkout_id", "")
     token = body.get("token", "")
     result = await _post(f"{MERCHANT_URL}/alipay/create-order", body={
-        "checkout_id":  body.get("checkout_id"),
-        "amount":       body.get("amount"),
-        "currency":     body.get("currency", "CNY"),
-        "product_name": body.get("product_name", ""),
+        "checkout_id":       checkout_id,
+        "merchant_order_id": checkout_id,   # Alipay field: merchant自定义订单号
+        "amount":            body.get("amount"),
+        "currency":          body.get("currency", "CNY"),
+        "product_name":      body.get("product_name", ""),
+        "agent_pay_info": {                  # Alipay AI Pay required field
+            "agent_type": "AI_AGENT",
+            "agent_id":   AGENT_PROFILE["id"],
+            "agent_name": AGENT_PROFILE["name"],
+        },
     }, token=token)
     return result
 

@@ -529,7 +529,8 @@ async function payAlipay(pid, amount, currency, product, cfg) {
     window.removeEventListener('message', handler);
     cashierDiv.classList.remove('show');
     disablePayCard(pid);
-    setStatus('thinking', '支付宝已确认，完成结账…');
+    setStatus('thinking', '🔐 服务端验证支付中…');
+    addBubble('agent', '✅ 支付宝确认成功，正在服务端验证并生成授权凭证…');
     await doPhase2(pid, null, e.data.alipay_order_id, e.data.intent_credential);
   });
 }
@@ -698,20 +699,21 @@ async function streamSSE(fetchPromise, handlers) {
 
 // ── Protocol log ──────────────────────────────────────────────────────────────
 const LOG_NAMES = {
-  ucp_discover:        'GET /.well-known/ucp',
-  ucp_get_token:       'POST /oauth/token',
-  ucp_browse_catalog:  'POST /cart-sessions',
-  ucp_create_checkout: 'POST /checkout-sessions',
-  ucp_request_payment: '💳 Payment Request',
-  ucp_complete_checkout:'POST /checkout-sessions/{id}/complete',
-  ucp_track_order:     'GET /orders/{id}',
-  ap2_mandate:         '🔐 AP2 Mandate',
+  ucp_discover:           'GET /.well-known/ucp',
+  ucp_get_token:          'POST /oauth/token',
+  ucp_browse_catalog:     'POST /cart-sessions',
+  ucp_create_checkout:    'POST /checkout-sessions',
+  ucp_request_payment:    '💳 Payment Request',
+  ucp_complete_checkout:  'POST /checkout-sessions/{id}/complete',
+  ucp_track_order:        'GET /orders/{id}',
+  ap2_mandate:            '🔐 AP2 Mandate',
+  alipay_verify_payment:  'GET /alipay/query-order/{id}',
 };
 const LOG_METHS = {
   ucp_discover: 'GET', ucp_get_token: 'POST', ucp_browse_catalog: 'POST',
   ucp_create_checkout: 'POST', ucp_request_payment: 'POST',
   ucp_complete_checkout: 'POST', ucp_track_order: 'GET',
-  ap2_mandate: 'AP2',
+  ap2_mandate: 'AP2', alipay_verify_payment: 'GET',
 };
 
 function addLogEntry(id, name, args) {
