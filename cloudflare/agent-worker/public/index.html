@@ -298,6 +298,7 @@ header   { display: flex; align-items: center; gap: 10px; padding: 12px 20px; ba
         <textarea id="input" placeholder="告诉 Agent 你想要什么…" rows="2"
           onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
         <button class="send-btn" id="send-btn" onclick="send()">发送</button>
+        <button title="新对话" style="padding:0 10px;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;cursor:pointer;height:36px;font-size:12px;white-space:nowrap" onclick="newConversation()">新对话</button>
       </div>
     </section>
 
@@ -330,8 +331,16 @@ const AGENT_BASE = (window.AGENT_BASE || '').replace(/\/$/, '');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let busy = false;
-let currentThreadId = null;     // LangGraph thread_id for conversation continuity
-let currentUserId = 'guest';
+// Each conversation gets a fresh UUID so KV history is per-session, not shared.
+let currentThreadId = crypto.randomUUID();
+// Anonymous user ID — persists in sessionStorage so the same tab keeps one identity,
+// but clears when the tab closes (important for shared kiosk devices).
+// Face recognition overrides this with the enrolled user's name.
+let currentUserId = (() => {
+  let id = sessionStorage.getItem('ucp_uid');
+  if (!id) { id = 'anon-' + crypto.randomUUID().slice(0, 8); sessionStorage.setItem('ucp_uid', id); }
+  return id;
+})();
 const pendingPayments = {};     // pid → {thread_id, checkout_id, token, amount, currency}
 const _lastToolLogId = {};      // tool name → last log entry id (for result correlation)
 
@@ -686,6 +695,8 @@ async function doPhase2(pid, gpayToken, alipayOrderId, intentCredential) {
       payment_done: p => {
         delete pendingPayments[pid];
         addOrderCard(p.order_id, p.amount, p.product, p.events || [], p.pickup_code, p.pickup_url);
+        // Kiosk: auto-reset after purchase so next user gets a clean session
+        if (kioskActive) setTimeout(() => newConversation(), 15000);
       },
       done: p => {
         if (p?.thread_id) currentThreadId = p.thread_id;
@@ -874,6 +885,26 @@ function updateLogEntry(id, status, data) {
     badge.textContent = status || '✓';
   }
   if (body && data) body.innerHTML = pjson(data);
+}
+
+// Start a fresh conversation: new thread_id isolates KV history from the previous user.
+// In kiosk mode this is called automatically after purchase completes.
+function newConversation() {
+  currentThreadId = crypto.randomUUID();
+  // Reset to anonymous user for kiosk (face re-auth required per session)
+  if (kioskActive) {
+    clearBiometric();
+    const newAnon = 'anon-' + crypto.randomUUID().slice(0, 8);
+    currentUserId = newAnon;
+    sessionStorage.setItem('ucp_uid', newAnon);
+  }
+  // Clear chat messages (keep log)
+  const msgs = document.getElementById('messages');
+  if (msgs) msgs.innerHTML = '';
+  addBubble('agent', '✨ 新对话已开始，我可以为您服务！');
+  document.getElementById('suggestions').style.display = '';
+  busy = false;
+  document.getElementById('send-btn').disabled = false;
 }
 
 function clearLog() {
@@ -1065,7 +1096,14 @@ function clearAttentionTimer() {
 }
 
 function setCurrentUser(name, confidence) {
+  // If switching to a different user, start a fresh conversation thread
+  if (currentUserId !== name) {
+    currentThreadId = crypto.randomUUID();
+    const msgs = document.getElementById('messages');
+    if (msgs) msgs.innerHTML = '';
+  }
   currentUserId = name;
+  sessionStorage.setItem('ucp_uid', name);
   currentBiometric = {
     method: 'face_recognition',
     provider: 'face-api.js',
