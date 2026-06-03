@@ -32,7 +32,11 @@ async function hmacSign(data: string, secret: string): Promise<string> {
 }
 
 function b64url(obj: object): string {
-  return btoa(JSON.stringify(obj)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+  // btoa is Latin1-only; encode to UTF-8 bytes first so Chinese chars work
+  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
 }
 
 async function signJWT(payload: object, secret: string): Promise<string> {
@@ -227,13 +231,14 @@ async function execTool(
           if (h.handler_id === "google_pay")   gpayConfig   = h.config;
         }
       } catch { /* ignore */ }
+      const jwtSecret = secret || "ucp-agent-dev-fallback-secret";
       const paymentJwt = await signJWT({
         sub: "pending_payment",
         token: args.token, checkout_id: args.checkout_id,
         amount: args.amount, currency: args.currency,
         product_name: args.product_name, lane_id: args.lane_id,
         exp: Math.floor(Date.now() / 1000) + PAYMENT_JWT_TTL,
-      }, secret);
+      }, jwtSecret);
       return { status: 200, data: {
         payment_id: paymentJwt, requires_user_confirmation: true,
         amount: args.amount, currency: args.currency, product_name: args.product_name,
@@ -294,30 +299,56 @@ async function execTool(
   }
 }
 
+// ── Conversation history in KV (keyed by thread_id) ─────────────────────────
+type ChatMsg = { role: string; content?: string; tool_calls?: unknown[]; tool_call_id?: string };
+const HISTORY_TTL = 3600; // 1 hour
+const HISTORY_MAX = 40;   // max messages kept
+
+async function loadHistory(kv: KVNamespace, threadId: string): Promise<ChatMsg[]> {
+  if (!threadId) return [];
+  try {
+    const raw = await kv.get(`thread:${threadId}`);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+async function saveHistory(kv: KVNamespace, threadId: string, msgs: ChatMsg[]): Promise<void> {
+  if (!threadId) return;
+  const trimmed = msgs.slice(-HISTORY_MAX);
+  await kv.put(`thread:${threadId}`, JSON.stringify(trimmed), { expirationTtl: HISTORY_TTL });
+}
+
 // ── Phase 1: chat ─────────────────────────────────────────────────────────────
 function phase1Stream(
-  userMessage: string, userId: string,
+  userMessage: string, userId: string, threadId: string,
   mock: Fetcher, sc: Fetcher, kv: KVNamespace,
   base: string, env: Env,
 ): ReadableStream {
   const systemPrompt =
-    `你是 UCP Vending Agent，AI 驱动的自动贩卖机智能购物助手。\n` +
-    `Agent Profile: ${base}/profile    当前用户: ${userId}\n\n` +
-    `标准购买流程（严格按序）：\n` +
+    `你是 UCP Vending Agent，AI 驱动的自动贩卖机智能购物助手。当前用户: ${userId}\n\n` +
+    `标准购买流程（严格按序执行，不要等用户二次确认）：\n` +
     `1. ucp_discover  2. ucp_get_token  3. get_welfare_balance(user_id="${userId}")\n` +
-    `4. ucp_browse_catalog  5. ucp_create_checkout  6. ucp_request_payment\n` +
-    `   ⚠️ ucp_request_payment 调用后停止，等待用户支付，不要调用 complete。\n\n` +
-    `缺货：先 query_supplier_sku，询问预订 → create_preorder → notify_ops。\n` +
-    `供应链查询：get_inventory / preview_daily_order / trigger_daily_order。\n` +
-    `价格用 ¥X.XX 格式，回复简洁。`;
-
-  const messages: unknown[] = [
-    { role: "system", content: systemPrompt },
-    { role: "user",   content: userMessage },
-  ];
+    `4. ucp_browse_catalog — 根据用户描述自动选最匹配商品，不要询问"您想要哪个"\n` +
+    `5. ucp_create_checkout  6. ucp_request_payment\n` +
+    `   ⚠️ ucp_request_payment 调用后立刻停止，等待支付确认，不要调用 complete。\n\n` +
+    `缺货：query_supplier_sku → create_preorder → notify_ops。\n` +
+    `供应链：get_inventory / preview_daily_order / trigger_daily_order。\n` +
+    `价格用 ¥X.XX 格式，回复简洁直接。`;
 
   return new ReadableStream({
     async start(ctrl) {
+      // Load history, append current user message
+      const history = await loadHistory(kv, threadId);
+      const messages: ChatMsg[] = [
+        { role: "system", content: systemPrompt },
+        ...history,
+        { role: "user", content: userMessage },
+      ];
+      // Messages to persist (exclude system prompt)
+      const newMsgs: ChatMsg[] = [{ role: "user", content: userMessage }];
+      // Track last checkout result to avoid LLM mangling long JWT IDs
+      let lastCheckout: { checkout_id: string; token: string; amount: number; currency: string; lane_id: string } | null = null;
+
       try {
         for (let i = 0; i < 10; i++) {
           const res = await fetch(GLM_URL, {
@@ -338,25 +369,50 @@ function phase1Stream(
           const finish = result.choices[0].finish_reason;
 
           if (msg.content) ctrl.enqueue(sseEnc("text", { content: msg.content }));
-          if (finish === "stop" || !msg.tool_calls?.length) break;
+          if (finish === "stop" || !msg.tool_calls?.length) {
+            // Save final assistant text reply to history
+            if (msg.content) newMsgs.push({ role: "assistant", content: msg.content });
+            break;
+          }
 
-          messages.push({
+          const asstMsg: ChatMsg = {
             role: "assistant", content: msg.content ?? "",
-            tool_calls: msg.tool_calls.map(tc => ({
+            tool_calls: msg.tool_calls!.map(tc => ({
               id: tc.id, type: "function",
               function: { name: tc.function.name, arguments: tc.function.arguments },
             })),
-          });
+          };
+          messages.push(asstMsg);
+          newMsgs.push(asstMsg);
 
-          for (const tc of msg.tool_calls) {
+          for (const tc of msg.tool_calls!) {
             const fn = tc.function.name;
             let args: Record<string, unknown> = {};
             try { args = JSON.parse(tc.function.arguments || "{}"); } catch { /* ignore */ }
 
+            // For ucp_request_payment, override checkout_id/token with tracked values
+            // to avoid LLM mangling long JWT strings during transcription
+            if (fn === "ucp_request_payment" && lastCheckout) {
+              args = { ...args, ...lastCheckout };
+            }
             ctrl.enqueue(sseEnc("tool_call", { id: tc.id, name: fn, args }));
             const toolRes = await execTool(fn, args, mock, sc, kv, base, env.AGENT_SECRET, env);
+
+            // Track checkout session details for phase-2 passthrough
+            if (fn === "ucp_create_checkout" && toolRes.status === 200) {
+              const d = toolRes.data as Record<string, unknown>;
+              lastCheckout = {
+                checkout_id: String(d.checkout_session_id ?? ""),
+                token:       String(args.token ?? ""),
+                amount:      Number((d as Record<string,unknown>).amount ?? args.amount ?? 0),
+                currency:    String((d as Record<string,unknown>).currency ?? args.currency ?? "CNY"),
+                lane_id:     String(args.lane_id ?? ""),
+              };
+            }
             ctrl.enqueue(sseEnc("tool_result", { id: tc.id, name: fn, status: toolRes.status, data: toolRes.data }));
-            messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(toolRes) });
+            const toolMsg: ChatMsg = { role: "tool", tool_call_id: tc.id, content: JSON.stringify(toolRes) };
+            messages.push(toolMsg);
+            newMsgs.push(toolMsg);
 
             if (fn === "ucp_request_payment") {
               const d = toolRes.data as Record<string, unknown>;
@@ -370,13 +426,20 @@ function phase1Stream(
                   google_pay: d.google_pay, alipay: d.alipay,
                   user_id: userId,
                 }));
+                // Save history up to payment pause point
+                await saveHistory(kv, threadId, [...history, ...newMsgs]);
+                ctrl.enqueue(sseEnc("done", {}));
+                ctrl.close();
+                return;
               }
             }
           }
         }
+        await saveHistory(kv, threadId, [...history, ...newMsgs]);
       } catch (e) {
-        console.error("phase1", e);
-        ctrl.enqueue(sseEnc("text", { content: "❌ Agent 异常，请重试。" }));
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error("phase1 error:", msg);
+        ctrl.enqueue(sseEnc("text", { content: `❌ Agent 异常：${msg}` }));
       }
       ctrl.enqueue(sseEnc("done", {}));
       ctrl.close();
@@ -396,7 +459,8 @@ function phase2Stream(
     async start(ctrl) {
       try {
         // Decode stateless JWT payment_id (no Map lookup needed)
-        const pending = await verifyJWT(paymentId, env.AGENT_SECRET);
+        const jwtSecret = env.AGENT_SECRET || "ucp-agent-dev-fallback-secret";
+        const pending = await verifyJWT(paymentId, jwtSecret);
         if (!pending) {
           ctrl.enqueue(sseEnc("text", { content: "⚠️ 支付链接已过期，请重新发起购买。" }));
           ctrl.enqueue(sseEnc("done", {})); ctrl.close(); return;
@@ -561,9 +625,10 @@ export default {
       const body = await req.json().catch(() => ({})) as Record<string, string>;
       const msg  = (body.message ?? "").trim();
       const uid  = body.user_id || "guest";
+      const tid  = body.thread_id || "";
       if (!msg) return jsonResp({ error: "empty" }, 400);
       return new Response(
-        phase1Stream(msg, uid, env.MOCK, env.SUPPLY_CHAIN, env.WELFARE_KV, base, env),
+        phase1Stream(msg, uid, tid, env.MOCK, env.SUPPLY_CHAIN, env.WELFARE_KV, base, env),
         { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
           "X-Accel-Buffering": "no", "Access-Control-Allow-Origin": "*" }});
     }
