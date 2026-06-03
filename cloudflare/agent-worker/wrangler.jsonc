@@ -12,12 +12,11 @@
     { "binding": "SUPPLY_CHAIN", "service": "supply-chain-mock" }
   ],
   "kv_namespaces": [
-    { "binding": "WELFARE_KV", "id": "PLACEHOLDER_RUN_deploy_sh" }
+    { "binding": "WELFARE_KV", "id": "18172b20c18c4a03bb2fca189d3291d8" }
   ],
   "vars": {
     "MERCHANT_URL": "https://ucp-mock.fxp007.workers.dev",
     "SLACK_OPS_CHANNEL": "#vending-ops",
-    "SLACK_BOT_TOKEN": "",
-    "AGENT_SECRET": "dev-agent-secret-change-in-prod"
+    "SLACK_BOT_TOKEN": ""
   }
 }

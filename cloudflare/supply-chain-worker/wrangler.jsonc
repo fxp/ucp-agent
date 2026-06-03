@@ -4,6 +4,6 @@
   "compatibility_date": "2024-09-23",
   "account_id": "0356d59ccdcff356bf3bbdb580bbaa60",
   "kv_namespaces": [
-    { "binding": "SC_KV", "id": "PLACEHOLDER_RUN_deploy_sh" }
+    { "binding": "SC_KV", "id": "38f0c26366de41e8b741450cb8e80894" }
   ]
 }
