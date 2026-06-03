@@ -7,6 +7,9 @@
     "directory": "./public",
     "binding": "ASSETS"
   },
+  "services": [
+    { "binding": "MOCK", "service": "ucp-mock" }
+  ],
   "vars": {
     "MERCHANT_URL": "https://ucp-mock.fxp007.workers.dev"
   }

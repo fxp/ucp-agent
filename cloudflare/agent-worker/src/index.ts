@@ -8,6 +8,7 @@ export interface Env {
   GLM_API_KEY: string;
   MERCHANT_URL: string;
   ASSETS: Fetcher;
+  MOCK: Fetcher;
 }
 
 const GLM_URL   = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
@@ -47,20 +48,20 @@ function ucpHeaders(base: string, token?: string): Record<string, string> {
   return h;
 }
 
-async function ucpGet(url: string, base: string, token?: string) {
-  const r = await fetch(url, { headers: ucpHeaders(base, token) });
+async function mockGet(mock: Fetcher, path: string, base: string, token?: string) {
+  const r = await mock.fetch(new Request(`https://mock${path}`, { headers: ucpHeaders(base, token) }));
   return { status: r.status, data: await r.json().catch(() => ({})) };
 }
 
-async function ucpPost(url: string, base: string, body?: unknown, token?: string, form?: string) {
+async function mockPost(mock: Fetcher, path: string, base: string, body?: unknown, token?: string, form?: string) {
   if (form !== undefined) {
-    const r = await fetch(url, { method: "POST", body: form,
-      headers: { "Content-Type": "application/x-www-form-urlencoded", "UCP-Agent": `profile="${base}/profile"` } });
+    const r = await mock.fetch(new Request(`https://mock${path}`, { method: "POST", body: form,
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "UCP-Agent": `profile="${base}/profile"` } }));
     return { status: r.status, data: await r.json().catch(() => ({})) };
   }
-  const r = await fetch(url, { method: "POST",
+  const r = await mock.fetch(new Request(`https://mock${path}`, { method: "POST",
     body: body !== undefined ? JSON.stringify(body) : undefined,
-    headers: ucpHeaders(base, token) });
+    headers: ucpHeaders(base, token) }));
   return { status: r.status, data: await r.json().catch(() => ({})) };
 }
 
@@ -111,19 +112,19 @@ const TOOLS = [
 ];
 
 // ── Tool execution ─────────────────────────────────────────────────────────────
-async function execTool(name: string, args: Record<string, unknown>, merchantUrl: string, base: string) {
+async function execTool(name: string, args: Record<string, unknown>, mock: Fetcher, base: string) {
   switch (name) {
     case "ucp_discover":
-      return ucpGet(`${merchantUrl}/.well-known/ucp`, base);
+      return mockGet(mock, "/.well-known/ucp", base);
     case "ucp_get_token":
-      return ucpPost(`${merchantUrl}/oauth/token`, base, undefined, undefined,
+      return mockPost(mock, "/oauth/token", base, undefined, undefined,
         "grant_type=client_credentials&client_id=demo&client_secret=demo");
     case "ucp_browse_catalog":
-      return ucpPost(`${merchantUrl}/cart-sessions`, base, {}, args.token as string);
+      return mockPost(mock, "/cart-sessions", base, {}, args.token as string);
     case "ucp_create_checkout": {
-      const profile = await ucpGet(`${merchantUrl}/.well-known/ucp`, base);
+      const profile = await mockGet(mock, "/.well-known/ucp", base);
       const handlers = ((profile.data as Record<string, unknown>)?.payment_handlers ?? []) as unknown[];
-      const res = await ucpPost(`${merchantUrl}/checkout-sessions`, base, {
+      const res = await mockPost(mock, "/checkout-sessions", base, {
         line_items: [{ id: args.lane_id, quantity: 1 }],
         buyer: { email: args.buyer_email },
         payment: { handler_id: "alipay_aipay", instrument: {} },
@@ -136,7 +137,7 @@ async function execTool(name: string, args: Record<string, unknown>, merchantUrl
       const pid = crypto.randomUUID();
       let alipayConfig: unknown = null, gpayConfig: unknown = null;
       try {
-        const profile = await ucpGet(`${merchantUrl}/.well-known/ucp`, base);
+        const profile = await mockGet(mock, "/.well-known/ucp", base);
         const handlers = ((profile.data as Record<string, unknown>)?.payment_handlers ?? []) as Array<Record<string, unknown>>;
         for (const h of handlers) {
           if (h.handler_id === "alipay_aipay") alipayConfig = h.config ?? h.ap2;
@@ -170,10 +171,10 @@ function buildMandate(body: object): string {
 }
 
 // ── Phase 1 ───────────────────────────────────────────────────────────────────
-function phase1Stream(userMessage: string, merchantUrl: string, base: string, env: Env): ReadableStream {
+function phase1Stream(userMessage: string, mock: Fetcher, base: string, env: Env): ReadableStream {
   const systemPrompt =
     `你是 UCP Customer Agent，实现 UCP 2026-04-08 + AP2 Mandate 协议的 AI 购物助手。\n` +
-    `商户: ${merchantUrl} | Agent Profile: ${base}/profile\n\n` +
+    `Agent Profile: ${base}/profile\n\n` +
     `商户支持：支付宝 AI Pay (ACT/1.0)、Google Pay、预付 Token。\n\n` +
     `用户请求购物时，按以下步骤依次执行：\n` +
     `1. ucp_discover — 发现商户能力\n` +
@@ -227,7 +228,7 @@ function phase1Stream(userMessage: string, merchantUrl: string, base: string, en
             try { args = JSON.parse(tc.function.arguments || "{}"); } catch { /* ignore */ }
 
             ctrl.enqueue(sseEnc("tool_call", { id: tc.id, name: fn, args }));
-            const toolRes = await execTool(fn, args, merchantUrl, base);
+            const toolRes = await execTool(fn, args, mock, base);
             ctrl.enqueue(sseEnc("tool_result", { id: tc.id, name: fn, status: toolRes.status, data: toolRes.data }));
             messages.push({ role: "tool", tool_call_id: tc.id, content: JSON.stringify(toolRes) });
 
@@ -257,7 +258,7 @@ function phase1Stream(userMessage: string, merchantUrl: string, base: string, en
 function phase2Stream(
   paymentId: string, gpayToken: string | null,
   alipayOrderId: string | null, intentCredential: string | null,
-  merchantUrl: string, base: string
+  mock: Fetcher, base: string
 ): ReadableStream {
   return new ReadableStream({
     async start(ctrl) {
@@ -275,7 +276,7 @@ function phase2Stream(
           const vid = `alipay-verify-${crypto.randomUUID()}`;
           ctrl.enqueue(sseEnc("tool_call", { id: vid, name: "alipay_verify_payment",
             args: { alipay_order_id: alipayOrderId, checkout_id } }));
-          const verify = await ucpGet(`${merchantUrl}/alipay/query-order/${alipayOrderId}`, base, token);
+          const verify = await mockGet(mock, `/alipay/query-order/${alipayOrderId}`, base, token);
           ctrl.enqueue(sseEnc("tool_result", { id: vid, name: "alipay_verify_payment",
             status: verify.status, data: verify.data }));
 
@@ -318,8 +319,8 @@ function phase2Stream(
         ctrl.enqueue(sseEnc("tool_call", { id: cid, name: "ucp_complete_checkout",
           args: { checkout_id, ap2_mandate: ap2Mandate ? "included" : null } }));
         const completeBody = ap2Mandate ? { ap2: { checkout_mandate: ap2Mandate } } : {};
-        const completeRes = await ucpPost(
-          `${merchantUrl}/checkout-sessions/${checkout_id}/complete`,
+        const completeRes = await mockPost(
+          mock, `/checkout-sessions/${checkout_id}/complete`,
           base, completeBody, token);
         ctrl.enqueue(sseEnc("tool_result", { id: cid, name: "ucp_complete_checkout",
           status: completeRes.status, data: completeRes.data }));
@@ -341,7 +342,7 @@ function phase2Stream(
         const tid = `track-${crypto.randomUUID()}`;
         ctrl.enqueue(sseEnc("tool_call", { id: tid, name: "ucp_track_order", args: { order_id: orderId } }));
         await new Promise<void>(r => setTimeout(r, 1000));
-        const trackRes = await ucpGet(`${merchantUrl}/orders/${orderId}`, base, token);
+        const trackRes = await mockGet(mock, `/orders/${orderId}`, base, token);
         ctrl.enqueue(sseEnc("tool_result", { id: tid, name: "ucp_track_order",
           status: trackRes.status, data: trackRes.data }));
 
@@ -377,7 +378,7 @@ export default {
     const url  = new URL(req.url);
     const path = url.pathname;
     const base = agentBase(url);
-    const merchant = env.MERCHANT_URL;
+    const mock = env.MOCK;
 
     // Static files via Workers Assets
     if (path === "/" || path === "/index.html") {
@@ -392,14 +393,14 @@ export default {
     }
 
     if (path === "/health") {
-      return jsonResp({ ok: true, merchant });
+      return jsonResp({ ok: true });
     }
 
     if (path === "/api/chat" && req.method === "POST") {
       const body = await req.json().catch(() => ({})) as Record<string, string>;
       const msg  = (body.message ?? "").trim();
       if (!msg) return jsonResp({ error: "empty" }, 400);
-      return new Response(phase1Stream(msg, merchant, base, env), { headers: {
+      return new Response(phase1Stream(msg, mock, base, env), { headers: {
         "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no", "Access-Control-Allow-Origin": "*",
       }});
@@ -409,7 +410,7 @@ export default {
       const body = await req.json().catch(() => ({})) as Record<string, unknown>;
       const checkoutId = String(body.checkout_id ?? "");
       const token = String(body.token ?? "");
-      const res = await ucpPost(`${merchant}/alipay/create-order`, base, {
+      const res = await mockPost(mock, "/alipay/create-order", base, {
         checkout_id: checkoutId, merchant_order_id: checkoutId,
         amount: body.amount, currency: body.currency ?? "CNY",
         product_name: body.product_name ?? "",
@@ -423,7 +424,7 @@ export default {
       return new Response(phase2Stream(
         body.payment_id ?? "", body.gpay_token ?? null,
         body.alipay_order_id ?? null, body.intent_credential ?? null,
-        merchant, base
+        mock, base
       ), { headers: {
         "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no", "Access-Control-Allow-Origin": "*",
