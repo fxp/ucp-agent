@@ -17,6 +17,7 @@
   "vars": {
     "MERCHANT_URL": "https://ucp-mock.fxp007.workers.dev",
     "SLACK_OPS_CHANNEL": "#vending-ops",
-    "SLACK_BOT_TOKEN": ""
+    "SLACK_BOT_TOKEN": "",
+    "SLACK_WEBHOOK_URL": ""
   }
 }

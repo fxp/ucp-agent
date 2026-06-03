@@ -464,8 +464,54 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   return notFound("Endpoint not found");
 }
 
+async function runDailyOrder(kv: KVNamespace): Promise<void> {
+  const inv = (await getInventoryAll(kv)) as any[];
+  const bySupplier: Record<string, any[]> = {};
+  for (const lane of inv) {
+    if (lane.qty < lane.min_qty) {
+      const sku = SKUS[lane.sku_id];
+      if (!sku) continue;
+      const reorderQty = Math.max(sku.moq, lane.capacity - lane.qty);
+      const sid = sku.supplier_id;
+      if (!bySupplier[sid]) bySupplier[sid] = [];
+      const existing = bySupplier[sid].find((i: any) => i.sku_id === lane.sku_id);
+      if (existing) { existing.qty += reorderQty; }
+      else bySupplier[sid].push({ sku_id: lane.sku_id, qty: reorderQty });
+    }
+  }
+  for (const [sid, items] of Object.entries(bySupplier)) {
+    const totalCost = items.reduce((s, i) => s + (SKUS[i.sku_id]?.cost_fen || 0) * i.qty, 0);
+    if (totalCost < SUPPLIERS[sid].min_order_yuan * 100) continue;
+    const now = nowIso();
+    const po: any = {
+      id: `PO-${uid()}`,
+      supplier_id: sid,
+      supplier_name: SUPPLIERS[sid].name,
+      items: items.map((i: any) => ({
+        sku_id: i.sku_id,
+        sku_name: SKUS[i.sku_id]?.name || i.sku_id,
+        qty: i.qty,
+        cost_fen: SKUS[i.sku_id]?.cost_fen || 0,
+      })),
+      note: "cron auto daily order",
+      priority: "normal",
+      status: "draft",
+      created_at: now,
+      updated_at: now,
+      status_history: [{ status: "draft", at: now }],
+    };
+    await kv.put(`po:${po.id}`, JSON.stringify(po));
+    console.log(`[cron] Created PO ${po.id} for supplier ${sid}, ${items.length} SKUs`);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     return handleRequest(request, env);
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
+    console.log("[cron] Daily auto-order triggered at", nowIso());
+    await runDailyOrder(env.SC_KV);
   },
 };

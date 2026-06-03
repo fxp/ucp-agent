@@ -924,7 +924,7 @@ async function toggleKiosk() {
 
   if (kioskActive) {
     await startCamera();
-    loadEnrolledFaces();
+    await loadEnrolledFaces();
     renderEnrolledList();
     if (!faceModelsLoaded) loadFaceModels();
   } else {
@@ -1124,17 +1124,18 @@ async function enrollFace() {
 
   // Average descriptor for robustness
   const avg = descriptors[0].map((_, i) => descriptors.reduce((s, d) => s + d[i], 0) / descriptors.length);
-  enrolledFaces.push({ name, descriptor: avg, enrolledAt: new Date().toISOString() });
-  saveEnrolledFaces();
+  const entry = { name, descriptor: avg, enrolledAt: new Date().toISOString() };
+  enrolledFaces.push(entry);
+  await saveFaceToKV(name, avg);
   renderEnrolledList();
   nameEl.value = '';
   setFaceStatus(`✓ ${name} 注册成功（${descriptors.length} 帧）`, 'recognized');
 }
 
-function deleteEnrolled(name) {
+async function deleteEnrolled(name) {
   enrolledFaces = enrolledFaces.filter(f => f.name !== name);
   if (recognizedUser?.name === name) { recognizedUser = null; currentBiometric = null; currentUserId = 'guest'; updateBioStatus(); }
-  saveEnrolledFaces();
+  await deleteFaceFromKV(name);
   renderEnrolledList();
 }
 
@@ -1150,11 +1151,36 @@ function renderEnrolledList() {
     : '<div style="color:var(--muted);font-size:11px">暂无已注册用户</div>';
 }
 
-function saveEnrolledFaces() {
-  try { localStorage.setItem('ucp_enrolled_faces', JSON.stringify(enrolledFaces)); } catch {}
+async function saveFaceToKV(name, descriptor) {
+  try {
+    await fetch(`/api/faces/${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ descriptor, enrolled_at: new Date().toISOString() }),
+    });
+  } catch (e) { console.warn('face KV save failed', e); }
 }
 
-function loadEnrolledFaces() {
+async function deleteFaceFromKV(name) {
+  try {
+    await fetch(`/api/faces/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  } catch (e) { console.warn('face KV delete failed', e); }
+}
+
+async function loadEnrolledFaces() {
+  try {
+    const res = await fetch('/api/faces');
+    if (res.ok) {
+      const json = await res.json();
+      enrolledFaces = (json.faces || []).map(f => ({
+        name: f.user_id,
+        descriptor: f.descriptor,
+        enrolledAt: f.enrolled_at,
+      }));
+      return;
+    }
+  } catch (e) { console.warn('face KV load failed, using localStorage fallback', e); }
+  // localStorage fallback
   try {
     const raw = localStorage.getItem('ucp_enrolled_faces');
     enrolledFaces = raw ? JSON.parse(raw) : [];

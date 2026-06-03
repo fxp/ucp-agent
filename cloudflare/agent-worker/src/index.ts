@@ -1,15 +1,18 @@
 /**
  * UCP Agent Worker — full-featured UCP AI shopping assistant.
  * Fixes: stateless JWT payment_id (no cross-isolate _pending Map).
- * New:   welfare (KV), supply-chain (Service Binding), Slack, biometric AP2.
+ * New:   welfare (KV), supply-chain (Service Binding), Slack, biometric AP2,
+ *        real ES256 AP2 mandate signing, face-enrollment KV API.
  */
 
 export interface Env {
   GLM_API_KEY: string;
-  AGENT_SECRET: string;       // signs payment JWTs; set via wrangler secret
+  AGENT_SECRET: string;        // signs payment JWTs; set via wrangler secret
+  AP2_PRIVATE_KEY: string;     // P-256 JWK for real ES256 AP2 mandate signing
+  SLACK_BOT_TOKEN: string;     // optional Bot token; leave empty to use SLACK_WEBHOOK_URL
+  SLACK_WEBHOOK_URL: string;   // optional Incoming Webhook URL (no bot token needed)
+  SLACK_OPS_CHANNEL: string;   // default #vending-ops
   MERCHANT_URL: string;
-  SLACK_BOT_TOKEN: string;    // optional; leave empty to mock-log
-  SLACK_OPS_CHANNEL: string;  // default #vending-ops
   ASSETS: Fetcher;
   MOCK: Fetcher;
   SUPPLY_CHAIN: Fetcher;
@@ -58,7 +61,7 @@ async function verifyJWT(token: string, secret: string): Promise<Record<string, 
   } catch { return null; }
 }
 
-// ── AP2 mandate builder ────────────────────────────────────────────────────────
+// ── AP2 mandate builder (kept for sync call sites; async real signing below) ──
 function buildMandate(body: object): string {
   const h = b64url({ alg: "ES256", typ: "ap2+sd-jwt", kid: "ucp-agent-v1" });
   const p = b64url(body);
@@ -121,14 +124,51 @@ async function putWelfare(kv: KVNamespace, userId: string, w: object) {
   await kv.put(`welfare:${userId}`, JSON.stringify(w));
 }
 
-// ── Optional Slack notify ─────────────────────────────────────────────────────
-async function slackPost(token: string, channel: string, text: string): Promise<void> {
-  if (!token) { console.log(`[Slack mock] ${channel}: ${text}`); return; }
-  await fetch("https://slack.com/api/chat.postMessage", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ channel, text }),
-  });
+// ── Slack notify: Bot token OR Incoming Webhook (no bot token needed) ────────
+async function slackPost(env: Env, text: string): Promise<void> {
+  const { SLACK_BOT_TOKEN: token, SLACK_WEBHOOK_URL: webhook, SLACK_OPS_CHANNEL: channel } = env;
+  if (webhook) {
+    await fetch(webhook, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+  } else if (token) {
+    await fetch("https://slack.com/api/chat.postMessage", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ channel: channel || "#vending-ops", text }),
+    });
+  } else {
+    console.log(`[Slack fallback] ${channel || "#vending-ops"}: ${text}`);
+  }
+}
+
+// ── Real ES256 AP2 mandate signing ────────────────────────────────────────────
+let _ap2Key: CryptoKey | null = null;
+async function getAp2Key(jwkStr: string): Promise<CryptoKey | null> {
+  if (_ap2Key) return _ap2Key;
+  if (!jwkStr) return null;
+  try {
+    _ap2Key = await crypto.subtle.importKey(
+      "jwk", JSON.parse(jwkStr) as JsonWebKey,
+      { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    return _ap2Key;
+  } catch { return null; }
+}
+
+async function buildMandateReal(body: object, privateKeyJwk: string): Promise<string> {
+  const h = b64url({ alg: "ES256", typ: "ap2+sd-jwt", kid: "ucp-agent-v1" });
+  const p = b64url(body);
+  const key = await getAp2Key(privateKeyJwk);
+  if (!key) {
+    // Fallback to mock sig if key unavailable
+    return `${h}.${p}.mock_platform_sig`;
+  }
+  const data = new TextEncoder().encode(`${h}.${p}`);
+  const sigBuf = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, data);
+  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sigBuf)))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+  return `${h}.${p}.${sigB64}`;
 }
 
 // ── Mock supplier SKUs (inline, no external call needed) ──────────────────────
@@ -289,9 +329,9 @@ async function execTool(
       return scPost(sc, "/internal/daily-order", { dry_run: args.dry_run ?? false });
 
     case "notify_ops": {
-      const ch = env.SLACK_OPS_CHANNEL || "#vending-ops";
-      await slackPost(env.SLACK_BOT_TOKEN, ch, String(args.message ?? ""));
-      return { status: 200, data: { ok: true, channel: ch, mock: !env.SLACK_BOT_TOKEN }};
+      await slackPost(env, String(args.message ?? ""));
+      const hasSlack = !!(env.SLACK_BOT_TOKEN || env.SLACK_WEBHOOK_URL);
+      return { status: 200, data: { ok: true, channel: env.SLACK_OPS_CHANNEL || "#vending-ops", real: hasSlack }};
     }
 
     default:
@@ -502,22 +542,25 @@ function phase2Stream(
               verified_at:    biometric.verified_at ?? ts,
             };
           }
-          ap2Mandate = buildMandate({
+          ap2Mandate = await buildMandateReal({
             type: "alipay_intent_credential", act_version: "ACT/1.0",
             credential: intentCredential, checkout_id, alipay_order_id: alipayOrderId,
             amount: { value: amount, currency }, agent_id: "ucp-agent-v1",
             issued_by: `${base}/profile`, iat: ts, exp: ts + 300,
             verification,
-          });
+          }, env.AP2_PRIVATE_KEY);
+          const isRealSig = !!env.AP2_PRIVATE_KEY;
           ctrl.enqueue(sseEnc("ap2_mandate", {
             type: "alipay_intent_credential", act: "ACT/1.0", verified: true,
             biometric_included: !!(biometric?.confidence),
+            real_signature: isRealSig,
             mandate_preview: ap2Mandate.slice(0, 72) + "…",
           }));
         } else if (gpayToken) {
-          ap2Mandate = buildMandate({ type: "google_pay_token",
+          ap2Mandate = await buildMandateReal({ type: "google_pay_token",
             token_preview: gpayToken.slice(0, 20) + "…", checkout_id,
-            agent_id: "ucp-agent-v1", issued_by: `${base}/profile`, iat: ts });
+            agent_id: "ucp-agent-v1", issued_by: `${base}/profile`, iat: ts },
+            env.AP2_PRIVATE_KEY);
         }
 
         ctrl.enqueue(sseEnc("text", { content: "✅ 支付已授权，正在完成结账…" }));
@@ -562,7 +605,7 @@ function phase2Stream(
         const notifyMsg = `✅ 出货成功\n商品：${product}\n金额：¥${(amountNum/100).toFixed(2)}\n` +
           (deducted > 0 ? `福利抵扣：¥${deducted.toFixed(2)}\n` : "") +
           `取货码：${pickupCode ?? "N/A"}\n用户：${userId}\n订单：${orderId}`;
-        await slackPost(env.SLACK_BOT_TOKEN, env.SLACK_OPS_CHANNEL || "#vending-ops", notifyMsg);
+        await slackPost(env, notifyMsg);
 
         // Track order (brief poll)
         const tid = `to-${crypto.randomUUID().slice(0, 8)}`;
@@ -618,7 +661,43 @@ export default {
         payment_support: ["alipay_aipay", "google_pay"] });
     }
     if (path === "/health") {
-      return jsonResp({ ok: true, bindings: { mock: !!env.MOCK, supply_chain: !!env.SUPPLY_CHAIN, welfare_kv: !!env.WELFARE_KV }});
+      return jsonResp({ ok: true, bindings: {
+        mock: !!env.MOCK, supply_chain: !!env.SUPPLY_CHAIN, welfare_kv: !!env.WELFARE_KV,
+        ap2_key: !!env.AP2_PRIVATE_KEY, slack: !!(env.SLACK_BOT_TOKEN || env.SLACK_WEBHOOK_URL),
+      }});
+    }
+
+    // ── Face enrollment KV API ─────────────────────────────────────────────────
+    if (path === "/api/faces" && req.method === "GET") {
+      const listResult = await env.WELFARE_KV.list({ prefix: "face:" });
+      const entries = await Promise.all(
+        listResult.keys.map(async k => {
+          const raw = await env.WELFARE_KV.get(k.name);
+          return raw ? { user_id: k.name.slice(5), ...JSON.parse(raw) } : null;
+        })
+      );
+      return jsonResp({ faces: entries.filter(Boolean) });
+    }
+
+    const faceMatch = path.match(/^\/api\/faces\/([^/]+)$/);
+    if (faceMatch) {
+      const faceUserId = faceMatch[1];
+      const kvKey = `face:${faceUserId}`;
+      if (req.method === "GET") {
+        const raw = await env.WELFARE_KV.get(kvKey);
+        if (!raw) return jsonResp({ user_id: faceUserId, enrolled: false }, 404);
+        return jsonResp({ user_id: faceUserId, enrolled: true, data: JSON.parse(raw) });
+      }
+      if (req.method === "POST") {
+        const body = await req.json().catch(() => null);
+        if (!body) return jsonResp({ error: "invalid JSON" }, 400);
+        await env.WELFARE_KV.put(kvKey, JSON.stringify(body), { expirationTtl: 86400 * 30 }); // 30 days
+        return jsonResp({ ok: true, user_id: faceUserId, enrolled: true });
+      }
+      if (req.method === "DELETE") {
+        await env.WELFARE_KV.delete(kvKey);
+        return jsonResp({ ok: true, user_id: faceUserId, enrolled: false });
+      }
     }
 
     if (path === "/api/chat" && req.method === "POST") {
