@@ -48,6 +48,7 @@ class ChatRequest(BaseModel):
     message: str
     user_id: str = "guest"
     thread_id: str | None = None
+    biometric: dict | None = None  # kiosk: {method, confidence, voice_verified, verified_at}
 
 
 class ConfirmPaymentRequest(BaseModel):
@@ -56,6 +57,7 @@ class ConfirmPaymentRequest(BaseModel):
     gpay_token: str | None = None
     alipay_order_id: str | None = None   # receipt_id (intent credential JWT)
     intent_credential: str | None = None
+    biometric: dict | None = None        # kiosk: biometric signal for AP2 mandate
 
 
 class AlipayCreateOrderRequest(BaseModel):
@@ -150,8 +152,9 @@ async def chat(req: ChatRequest):
     thread_id = req.thread_id or str(uuid.uuid4())
     config    = {"configurable": {"thread_id": thread_id}}
     input_data = {
-        "messages": [HumanMessage(content=req.message)],
-        "user_id":  req.user_id,
+        "messages":  [HumanMessage(content=req.message)],
+        "user_id":   req.user_id,
+        "biometric": req.biometric or {},
     }
 
     async def gen():
@@ -171,6 +174,7 @@ async def confirm_payment(req: ConfirmPaymentRequest):
         "alipay_receipt_id": req.alipay_order_id    or "",
         "intent_credential": req.intent_credential  or "",
         "gpay_token":        req.gpay_token         or "",
+        "biometric":         req.biometric          or {},
     }
 
     async def gen():

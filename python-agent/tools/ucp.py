@@ -89,7 +89,8 @@ async def ucp_request_payment(
         "requires_user_confirmation": True,
     })
 
-    # result is whatever /api/confirm-payment sent via Command(resume=...)
+    # result is whatever /api/confirm-payment sends via Command(resume=...)
+    # Forward biometric signal so ucp_complete_checkout can embed it in AP2 mandate
     return json.dumps({"payment_authorized": True, **(result or {})})
 
 
@@ -99,10 +100,11 @@ async def ucp_complete_checkout(
     checkout_id: str,
     alipay_receipt_id: str = "",
     intent_credential: str = "",
+    biometric: dict | None = None,
 ) -> str:
     """
-    服务端验证支付、构建 AP2 mandate 并完成结账。返回 order_id 和 pickup_code。
-    在 ucp_request_payment 返回后调用，使用支付回调中的 alipay_receipt_id。
+    服务端验证支付、构建 AP2 mandate（含生物识别信号）并完成结账。返回 order_id 和 pickup_code。
+    在 ucp_request_payment 返回后调用，使用支付回调中的 alipay_receipt_id 和 biometric。
     """
     async with httpx.AsyncClient(timeout=20) as c:
         # 1. Server-side Alipay verification (安全隔离原则)
@@ -118,15 +120,25 @@ async def ucp_complete_checkout(
             if vdata.get("intent_credential"):
                 intent_credential = vdata["intent_credential"]
 
-        # 2. Build AP2 checkout_mandate (mock SD-JWT)
+        # 2. Build AP2 checkout_mandate (mock SD-JWT, UCP §AP2)
         ap2_mandate = None
         if intent_credential:
             ts = int(time.time())
+            verification: dict = {"method": "server_query", "verified_at": ts}
+            # Embed biometric signal when available (kiosk mode)
+            if biometric and biometric.get("confidence"):
+                verification["biometric"] = {
+                    "method":       biometric.get("method", "face_recognition"),
+                    "provider":     biometric.get("provider", "face-api.js"),
+                    "confidence":   biometric.get("confidence"),
+                    "voice_verified": biometric.get("voice_verified", False),
+                    "verified_at":  biometric.get("verified_at", ts),
+                }
             payload = {
                 "type": "alipay_intent_credential", "act_version": "ACT/1.0",
                 "credential": intent_credential, "checkout_id": checkout_id,
                 "issued_by": "ucp-vending-agent-v1", "iat": ts, "exp": ts + 300,
-                "verification": {"method": "server_query", "verified_at": ts},
+                "verification": verification,
             }
             h = base64.urlsafe_b64encode(
                 b'{"alg":"ES256","typ":"ap2+sd-jwt","kid":"ucp-agent-v1"}').decode().rstrip("=")
