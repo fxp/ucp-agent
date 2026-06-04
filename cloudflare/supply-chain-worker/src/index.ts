@@ -2,18 +2,40 @@ export interface Env {
   SC_KV: KVNamespace;
 }
 
-const SUPPLIERS: Record<string, { id: string; name: string; lead_time_days: number; min_order_yuan: number }> = {
-  COKE_CN: { id: "COKE_CN", name: "可口可乐", lead_time_days: 2, min_order_yuan: 500 },
-  NONGFU: { id: "NONGFU", name: "农夫山泉", lead_time_days: 1, min_order_yuan: 300 },
-  MASTER_KONG: { id: "MASTER_KONG", name: "康师傅", lead_time_days: 2, min_order_yuan: 600 },
-  NESTLE: { id: "NESTLE", name: "雀巢", lead_time_days: 3, min_order_yuan: 800 },
-};
+interface Supplier {
+  id: string;
+  name: string;
+  lead_time_days: number;
+  min_order_yuan: number;
+}
 
-const MACHINES: Record<string, { id: string; name: string; location: string }> = {
-  "vm-001": { id: "vm-001", name: "1楼大厅", location: "1F Main Hall" },
-  "vm-002": { id: "vm-002", name: "2楼会议区", location: "2F Conference Wing" },
-  "vm-003": { id: "vm-003", name: "地下停车场", location: "B1 Parking" },
-};
+async function getSupplier(kv: KVNamespace, id: string): Promise<Supplier | null> {
+  const v = await kv.get(`supplier:${id}`);
+  return v ? JSON.parse(v) : null;
+}
+
+async function getAllSuppliers(kv: KVNamespace): Promise<Supplier[]> {
+  const list = await kv.list({ prefix: "supplier:" });
+  const items = await Promise.all(list.keys.map(k => kv.get(k.name)));
+  return items.filter(Boolean).map(v => JSON.parse(v!));
+}
+
+interface Machine {
+  id: string;
+  name: string;
+  location: string;
+}
+
+async function getMachine(kv: KVNamespace, id: string): Promise<Machine | null> {
+  const v = await kv.get(`machine:${id}`);
+  return v ? JSON.parse(v) : null;
+}
+
+async function getAllMachines(kv: KVNamespace): Promise<Machine[]> {
+  const list = await kv.list({ prefix: "machine:" });
+  const items = await Promise.all(list.keys.map(k => kv.get(k.name)));
+  return items.filter(Boolean).map(v => JSON.parse(v!));
+}
 
 interface Sku {
   sku_id: string;
@@ -220,31 +242,56 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   }
 
   // ── Machines endpoints ─────────────────────────────────────────────────────
-  if (method === "GET" && path === "/machines") {
-    const machineList = await Promise.all(
-      Object.values(MACHINES).map(async (m) => {
+  if (path === "/machines") {
+    if (method === "GET") {
+      const machines = await getAllMachines(kv);
+      const machineList = await Promise.all(machines.map(async (m) => {
         const stats = await getMachineStats(kv, m.id);
         return { ...m, ...stats };
-      })
-    );
-    return json(machineList);
+      }));
+      return json(machineList);
+    }
+    if (method === "POST") {
+      const body: any = await request.json();
+      const { id, name, location } = body;
+      if (!id) return badRequest("id required");
+      if (!name) return badRequest("name required");
+      const machine: Machine = { id, name, location: location || "" };
+      await kv.put(`machine:${id}`, JSON.stringify(machine));
+      return json(machine, 201);
+    }
   }
 
   const machineMatch = path.match(/^\/machines\/([^/]+)$/);
-  if (machineMatch && method === "GET") {
+  if (machineMatch) {
     const mid = machineMatch[1];
-    const machine = MACHINES[mid];
-    if (!machine) return notFound("Machine not found");
-    const stats = await getMachineStats(kv, mid);
-    const lanes = await getAllLanes(kv, mid);
-    return json({ ...machine, ...stats, lanes });
+    if (method === "GET") {
+      const machine = await getMachine(kv, mid);
+      if (!machine) return notFound("Machine not found");
+      const stats = await getMachineStats(kv, mid);
+      const lanes = await getAllLanes(kv, mid);
+      return json({ ...machine, ...stats, lanes });
+    }
+    if (method === "PUT") {
+      const existing = await getMachine(kv, mid);
+      if (!existing) return notFound("Machine not found");
+      const body: any = await request.json();
+      const updated: Machine = { ...existing, ...body, id: mid };
+      await kv.put(`machine:${mid}`, JSON.stringify(updated));
+      return json(updated);
+    }
+    if (method === "DELETE") {
+      await kv.delete(`machine:${mid}`);
+      return json({ deleted: true, id: mid });
+    }
   }
 
   // ── Lane config CRUD ───────────────────────────────────────────────────────
   const machineLanesMatch = path.match(/^\/machines\/([^/]+)\/lanes$/);
   if (machineLanesMatch) {
     const mid = machineLanesMatch[1];
-    if (!MACHINES[mid]) return notFound("Machine not found");
+    const lanesMachine = await getMachine(kv, mid);
+    if (!lanesMachine) return notFound("Machine not found");
     if (method === "GET") {
       return json(await getAllLanes(kv, mid));
     }
@@ -279,7 +326,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   if (machineLaneMatch) {
     const mid = machineLaneMatch[1];
     const laneId = machineLaneMatch[2];
-    if (!MACHINES[mid]) return notFound("Machine not found");
+    if (!await getMachine(kv, mid)) return notFound("Machine not found");
     if (method === "PUT") {
       const existing = await getLane(kv, mid, laneId);
       if (!existing) return notFound("Lane not found");
@@ -303,29 +350,53 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   const machineInvMatch = path.match(/^\/machines\/([^/]+)\/inventory$/);
   if (machineInvMatch && method === "GET") {
     const mid = machineInvMatch[1];
-    if (!MACHINES[mid]) return notFound("Machine not found");
+    if (!await getMachine(kv, mid)) return notFound("Machine not found");
     const inv = await getInventoryAll(kv, mid);
     return json(inv);
   }
 
-  if (method === "GET" && path === "/suppliers") {
-    return json(Object.values(SUPPLIERS));
+  if (path === "/suppliers") {
+    if (method === "GET") return json(await getAllSuppliers(kv));
+    if (method === "POST") {
+      const body: any = await request.json();
+      const { id, name, lead_time_days, min_order_yuan } = body;
+      if (!id) return badRequest("id required");
+      if (!name) return badRequest("name required");
+      if (typeof lead_time_days !== "number") return badRequest("lead_time_days required (number)");
+      if (typeof min_order_yuan !== "number") return badRequest("min_order_yuan required (number)");
+      const supplier: Supplier = { id, name, lead_time_days, min_order_yuan };
+      await kv.put(`supplier:${id}`, JSON.stringify(supplier));
+      return json(supplier, 201);
+    }
   }
 
   const supplierMatch = path.match(/^\/suppliers\/([^/]+)$/);
   if (supplierMatch) {
     const sid = supplierMatch[1];
     if (method === "GET") {
-      const supplier = SUPPLIERS[sid];
+      const supplier = await getSupplier(kv, sid);
       if (!supplier) return notFound("Supplier not found");
       return json(supplier);
+    }
+    if (method === "PUT") {
+      const existing = await getSupplier(kv, sid);
+      if (!existing) return notFound("Supplier not found");
+      const body: any = await request.json();
+      const updated: Supplier = { ...existing, ...body, id: sid };
+      await kv.put(`supplier:${sid}`, JSON.stringify(updated));
+      return json(updated);
+    }
+    if (method === "DELETE") {
+      await kv.delete(`supplier:${sid}`);
+      return json({ deleted: true, id: sid });
     }
   }
 
   const supplierSkuMatch = path.match(/^\/suppliers\/([^/]+)\/skus$/);
   if (supplierSkuMatch && method === "GET") {
     const sid = supplierSkuMatch[1];
-    if (!SUPPLIERS[sid]) return notFound("Supplier not found");
+    const supplier = await getSupplier(kv, sid);
+    if (!supplier) return notFound("Supplier not found");
     const keyword = url.searchParams.get("keyword") || "";
     let skus = (await getAllSkus(kv)).filter((s) => s.supplier_id === sid);
     if (keyword) {
@@ -339,7 +410,9 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     if (method === "POST") {
       const body: any = await request.json();
       const { supplier_id, items, note, priority, machine_id } = body;
-      if (!supplier_id || !SUPPLIERS[supplier_id]) return badRequest("Invalid supplier_id");
+      if (!supplier_id) return badRequest("supplier_id required");
+      const poSupplier = await getSupplier(kv, supplier_id);
+      if (!poSupplier) return badRequest("supplier_not_found: " + supplier_id);
       if (!items || !Array.isArray(items) || items.length === 0) return badRequest("items required");
       const resolvedItems: any[] = [];
       for (const item of items) {
@@ -353,7 +426,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       const po = {
         id: `PO-${uid()}`,
         supplier_id,
-        supplier_name: SUPPLIERS[supplier_id].name,
+        supplier_name: poSupplier.name,
         machine_id: machine_id || "vm-001",
         items: resolvedItems,
         note: note || "",
@@ -537,7 +610,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     }
     const suggestions: any[] = [];
     for (const [sid, items] of Object.entries(bySupplier)) {
-      const supplier = SUPPLIERS[sid];
+      const supplier = await getSupplier(kv, sid);
       if (!supplier) continue;
       const total_cost = items.reduce((s, i) => s + i.cost_fen, 0);
       suggestions.push({ supplier_id: sid, supplier_name: supplier.name, min_order_yuan: supplier.min_order_yuan, total_cost_fen: total_cost, meets_minimum: total_cost >= supplier.min_order_yuan * 100, items });
@@ -566,7 +639,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const created: any[] = [];
     const skipped: any[] = [];
     for (const [sid, items] of Object.entries(bySupplier)) {
-      const supplier = SUPPLIERS[sid];
+      const supplier = await getSupplier(kv, sid);
       if (!supplier) continue;
       const totalCost = items.reduce((s, i) => s + (i.sku?.cost_fen || 0) * i.qty, 0);
       if (totalCost < supplier.min_order_yuan * 100) {
@@ -617,7 +690,7 @@ async function runDailyOrder(kv: KVNamespace): Promise<void> {
     }
   }
   for (const [sid, items] of Object.entries(bySupplier)) {
-    const supplier = SUPPLIERS[sid];
+    const supplier = await getSupplier(kv, sid);
     if (!supplier) continue;
     const totalCost = items.reduce((s, i) => s + (i.sku?.cost_fen || 0) * i.qty, 0);
     if (totalCost < supplier.min_order_yuan * 100) continue;
