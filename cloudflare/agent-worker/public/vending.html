@@ -256,6 +256,22 @@ tr:hover td { background: var(--bg3); }
 }
 @keyframes slideIn { from{transform:translateX(20px);opacity:0} to{transform:none;opacity:1} }
 
+/* ── Machine Selector ── */
+.machine-selector-row {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 18px; flex-wrap: wrap;
+}
+.machine-selector-label { font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.machine-btn {
+  padding: 7px 16px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg3); color: var(--muted); font-size: 13px; cursor: pointer;
+  transition: all .15s; text-align: left;
+}
+.machine-btn:hover { border-color: var(--blue); color: var(--text); }
+.machine-btn.active { background: var(--blue-bg); border-color: var(--blue); color: var(--blue); }
+.machine-btn .btn-machine-name { font-weight: 600; display: block; }
+.machine-btn .btn-machine-loc { font-size: 11px; color: var(--muted); display: block; margin-top: 1px; }
+.machine-btn.active .btn-machine-loc { color: var(--blue); opacity: .8; }
+
 /* ── Utility ── */
 .row { margin-bottom: 20px; }
 .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
@@ -281,6 +297,27 @@ tr:hover td { background: var(--bg3); }
 
 <div class="page">
 
+  <!-- Machine Selector -->
+  <div class="row">
+    <div class="card">
+      <div class="machine-selector-row">
+        <span class="machine-selector-label">选择贩卖机：</span>
+        <button class="machine-btn active" id="btn-vm-001" onclick="selectMachine('vm-001')">
+          <span class="btn-machine-name">vm-001 · 1楼大厅</span>
+          <span class="btn-machine-loc">1F Main Hall</span>
+        </button>
+        <button class="machine-btn" id="btn-vm-002" onclick="selectMachine('vm-002')">
+          <span class="btn-machine-name">vm-002 · 2楼会议区</span>
+          <span class="btn-machine-loc">2F Conference Wing</span>
+        </button>
+        <button class="machine-btn" id="btn-vm-003" onclick="selectMachine('vm-003')">
+          <span class="btn-machine-name">vm-003 · 地下停车场</span>
+          <span class="btn-machine-loc">B1 Parking</span>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Machine Status -->
   <div class="row">
     <div class="card machine-bar" id="machine-bar">
@@ -288,12 +325,13 @@ tr:hover td { background: var(--bg3); }
         <div class="status-dot" id="machine-dot"></div>
         <div>
           <div style="display:flex;align-items:center;gap:8px">
-            <span class="machine-name">UCP Vending Machine</span>
+            <span class="machine-name" id="machine-name-display">vm-001 · 1楼大厅</span>
             <span class="status-label" id="machine-status-label">在线</span>
           </div>
           <div class="machine-type" id="machine-type">正在加载...</div>
         </div>
       </div>
+      <div style="font-size:12px;color:var(--muted)" id="machine-loc-display">1F Main Hall</div>
       <div class="machine-right">
         <div class="machine-meta">UCP版本 <strong id="ucp-version">—</strong></div>
         <div class="payment-badges" id="payment-badges"></div>
@@ -392,19 +430,40 @@ tr:hover td { background: var(--bg3); }
 
 <script>
 /* ── Constants ── */
-const INVENTORY_URL   = 'https://supply-chain-mock.fxp007.workers.dev/inventory';
+const SC_BASE         = 'https://supply-chain-mock.fxp007.workers.dev';
 const DISCOVERY_URL   = 'https://ucp-mock.fxp007.workers.dev/.well-known/ucp';
 const ORDER_BASE      = 'https://ucp-mock.fxp007.workers.dev/orders';
-const DAILY_URL       = 'https://supply-chain-mock.fxp007.workers.dev/internal/daily-order/preview';
 const MAX_ORDERS      = 5;
 
 /* ── State ── */
 let allLanes    = [];
 let currentView = 'grid';
+let selectedMachine = 'vm-001';
 let trackedOrders = {};   // orderId → { data, events, sse, collapsed }
 let countdownVal = 10;
 let countdownTimer = null;
 let refreshTimer  = null;
+
+/* ── Machine selector ── */
+const MACHINES = {
+  'vm-001': { name: '1楼大厅', location: '1F Main Hall' },
+  'vm-002': { name: '2楼会议区', location: '2F Conference Wing' },
+  'vm-003': { name: '地下停车场', location: 'B1 Parking' },
+};
+
+function selectMachine(machineId) {
+  selectedMachine = machineId;
+  Object.keys(MACHINES).forEach(id => {
+    const btn = document.getElementById('btn-' + id);
+    if (btn) btn.className = 'machine-btn' + (id === machineId ? ' active' : '');
+  });
+  const info = MACHINES[machineId] || {};
+  const nameEl = document.getElementById('machine-name-display');
+  if (nameEl) nameEl.textContent = `${machineId} · ${info.name || ''}`;
+  const locEl = document.getElementById('machine-loc-display');
+  if (locEl) locEl.textContent = info.location || '';
+  manualRefresh();
+}
 
 /* ── Toast ── */
 function showToast(msg) {
@@ -453,10 +512,12 @@ async function fetchJSON(url) {
 /* ── Main refresh ── */
 async function refresh() {
   startCountdown();
+  const inventoryUrl = `${SC_BASE}/inventory?machine_id=${encodeURIComponent(selectedMachine)}`;
+  const dailyUrl     = `${SC_BASE}/internal/daily-order/preview?machine_id=${encodeURIComponent(selectedMachine)}`;
   const [invResult, discResult, dailyResult] = await Promise.allSettled([
-    fetchJSON(INVENTORY_URL),
+    fetchJSON(inventoryUrl),
     fetchJSON(DISCOVERY_URL),
-    fetchJSON(DAILY_URL),
+    fetchJSON(dailyUrl),
   ]);
 
   if (invResult.status === 'fulfilled') {

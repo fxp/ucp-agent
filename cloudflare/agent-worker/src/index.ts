@@ -183,6 +183,9 @@ const MOCK_SKUS = [
 
 // ── Tool schemas ───────────────────────────────────────────────────────────────
 const TOOLS = [
+  { type: "function", function: { name: "list_machines",
+    description: "列出所有可用贩卖机及其位置和 ID。当用户想购买商品或询问使用哪台机器时，始终优先调用此工具。",
+    parameters: { type: "object", properties: {}, required: [] }}},
   { type: "function", function: { name: "ucp_discover",
     description: "GET /.well-known/ucp — 发现商户能力和支付处理器。",
     parameters: { type: "object", properties: {}, required: [] }}},
@@ -190,12 +193,18 @@ const TOOLS = [
     description: "POST /oauth/token — 获取 OAuth 2.0 Bearer Token。",
     parameters: { type: "object", properties: {}, required: [] }}},
   { type: "function", function: { name: "ucp_browse_catalog",
-    description: "POST /cart-sessions — 浏览商品目录，含 lane_id、价格、库存。",
-    parameters: { type: "object", properties: { token: { type: "string" }}, required: ["token"] }}},
+    description: "POST /cart-sessions — 浏览指定贩卖机的商品目录，含 lane_id、价格、库存。",
+    parameters: { type: "object", properties: {
+      token: { type: "string" },
+      machine_id: { type: "string", description: "贩卖机 ID，如 vm-001。默认 vm-001。" },
+    }, required: ["token"] }}},
   { type: "function", function: { name: "ucp_create_checkout",
     description: "POST /checkout-sessions — 创建结账会话，返回 checkout_id 和价格。",
     parameters: { type: "object",
-      properties: { token: { type: "string" }, lane_id: { type: "string" }, buyer_email: { type: "string" }},
+      properties: {
+        token: { type: "string" }, lane_id: { type: "string" }, buyer_email: { type: "string" },
+        machine_id: { type: "string", description: "贩卖机 ID，如 vm-001。默认 vm-001。" },
+      },
       required: ["token", "lane_id", "buyer_email"] }}},
   { type: "function", function: { name: "ucp_request_payment",
     description: "发起支付请求（流程暂停等用户确认）。amount 单位为分。",
@@ -219,9 +228,12 @@ const TOOLS = [
         quantity: { type: "integer" }, user_id: { type: "string" }, note: { type: "string" }},
       required: ["sku_id", "sku_name", "quantity", "user_id"] }}},
   { type: "function", function: { name: "get_inventory",
-    description: "查询贩卖机各货道当前库存。low_stock_only=true 只返回需补货货道。",
+    description: "查询指定贩卖机各货道当前库存。low_stock_only=true 只返回需补货货道。",
     parameters: { type: "object",
-      properties: { low_stock_only: { type: "boolean" }},
+      properties: {
+        low_stock_only: { type: "boolean" },
+        machine_id: { type: "string", description: "贩卖机 ID，如 vm-001。默认 vm-001。" },
+      },
       required: [] }}},
   { type: "function", function: { name: "preview_daily_order",
     description: "预览今日自动补货采购计划（不实际提交）。",
@@ -244,6 +256,11 @@ async function execTool(
 ): Promise<{ status: number; data: unknown }> {
   switch (name) {
 
+    case "list_machines": {
+      const r = await env.SUPPLY_CHAIN.fetch(new Request("https://sc/machines", { headers: { "Content-Type": "application/json" } }));
+      return { status: r.status, data: await r.json().catch(() => ({})) };
+    }
+
     case "ucp_discover":
       return mockGet(mock, "/.well-known/ucp", base);
 
@@ -251,15 +268,19 @@ async function execTool(
       return mockPost(mock, "/oauth/token", base, undefined, undefined,
         "grant_type=client_credentials&client_id=demo&client_secret=demo");
 
-    case "ucp_browse_catalog":
-      return mockPost(mock, "/cart-sessions", base, {}, args.token as string);
+    case "ucp_browse_catalog": {
+      const mid = String(args.machine_id ?? "vm-001");
+      return mockPost(mock, `/cart-sessions?machine_id=${encodeURIComponent(mid)}`, base, {}, args.token as string);
+    }
 
-    case "ucp_create_checkout":
-      return mockPost(mock, "/checkout-sessions", base, {
+    case "ucp_create_checkout": {
+      const mid = String(args.machine_id ?? "vm-001");
+      return mockPost(mock, `/checkout-sessions?machine_id=${encodeURIComponent(mid)}`, base, {
         line_items: [{ id: args.lane_id, quantity: 1 }],
         buyer: { email: args.buyer_email ?? "ai-agent@vending.local" },
         payment: { handler_id: "alipay_aipay", instrument: {} },
       }, args.token as string);
+    }
 
     case "ucp_request_payment": {
       let alipayConfig: unknown = null, gpayConfig: unknown = null;
@@ -320,7 +341,10 @@ async function execTool(
       });
 
     case "get_inventory":
-      return scGet(sc, "/inventory", { low_stock_only: args.low_stock_only ? "true" : "" });
+      return scGet(sc, "/inventory", {
+        low_stock_only: args.low_stock_only ? "true" : "",
+        machine_id: String(args.machine_id ?? "vm-001"),
+      });
 
     case "preview_daily_order":
       return scGet(sc, "/internal/daily-order/preview");
@@ -366,13 +390,17 @@ function phase1Stream(
 ): ReadableStream {
   const systemPrompt =
     `你是 UCP Vending Agent，AI 驱动的自动贩卖机智能购物助手。当前用户: ${userId}\n\n` +
+    `多机器支持：系统有多台贩卖机（vm-001 1楼大厅、vm-002 2楼会议区、vm-003 地下停车场）。\n` +
+    `购买前必须先确认用户在哪台机器旁边。如果用户没有说明，调用 list_machines 展示列表，\n` +
+    `让用户选择后再继续。将选定的 machine_id 传递给 ucp_browse_catalog、ucp_create_checkout。\n\n` +
     `标准购买流程（严格按序执行，不要等用户二次确认）：\n` +
-    `1. ucp_discover  2. ucp_get_token  3. get_welfare_balance(user_id="${userId}")\n` +
-    `4. ucp_browse_catalog — 根据用户描述自动选最匹配商品，不要询问"您想要哪个"\n` +
-    `5. ucp_create_checkout  6. ucp_request_payment\n` +
+    `1. list_machines（如果 machine_id 未知）  2. ucp_discover  3. ucp_get_token\n` +
+    `4. get_welfare_balance(user_id="${userId}")\n` +
+    `5. ucp_browse_catalog(machine_id=已选机器) — 根据用户描述自动选最匹配商品\n` +
+    `6. ucp_create_checkout(machine_id=已选机器)  7. ucp_request_payment\n` +
     `   ⚠️ ucp_request_payment 调用后立刻停止，等待支付确认，不要调用 complete。\n\n` +
     `缺货：query_supplier_sku → create_preorder → notify_ops。\n` +
-    `供应链：get_inventory / preview_daily_order / trigger_daily_order。\n` +
+    `供应链：get_inventory(machine_id=...) / preview_daily_order / trigger_daily_order。\n` +
     `价格用 ¥X.XX 格式，回复简洁直接。`;
 
   return new ReadableStream({

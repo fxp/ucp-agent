@@ -9,6 +9,13 @@ const SUPPLIERS: Record<string, { id: string; name: string; lead_time_days: numb
   NESTLE: { id: "NESTLE", name: "雀巢", lead_time_days: 3, min_order_yuan: 800 },
 };
 
+const MACHINES: Record<string, { id: string; name: string; location: string }> = {
+  "vm-001": { id: "vm-001", name: "1楼大厅", location: "1F Main Hall" },
+  "vm-002": { id: "vm-002", name: "2楼会议区", location: "2F Conference Wing" },
+  "vm-003": { id: "vm-003", name: "地下停车场", location: "B1 Parking" },
+};
+
+
 interface Sku {
   sku_id: string;
   name: string;
@@ -87,31 +94,20 @@ function badRequest(msg: string): Response {
   return json({ error: msg }, 400);
 }
 
-async function ensureSeeded(kv: KVNamespace): Promise<void> {
-  const seeded = await kv.get("inv_seeded");
-  if (seeded === "1") return;
-  const now = nowIso();
-  await Promise.all(
-    BASE_INVENTORY.map((lane) =>
-      kv.put(`inv:${lane.lane_id}`, JSON.stringify({ qty: lane.base_qty, last_restocked_at: now }))
-    )
-  );
-  await kv.put("inv_seeded", "1");
-}
-
-async function getInventoryAll(kv: KVNamespace): Promise<unknown[]> {
-  await ensureSeeded(kv);
-  const list = await kv.list({ prefix: "inv:" });
+async function getInventoryAll(kv: KVNamespace, machineId: string): Promise<unknown[]> {
+  const list = await kv.list({ prefix: `inv:${machineId}:` });
   const liveMap: Record<string, { qty: number; last_restocked_at: string }> = {};
   await Promise.all(
     list.keys.map(async (k) => {
       const val = await kv.get(k.name);
-      if (val) liveMap[k.name.slice(4)] = JSON.parse(val);
+      // key is inv:{machineId}:{lane_id}, extract lane_id
+      const laneId = k.name.slice(`inv:${machineId}:`.length);
+      if (val) liveMap[laneId] = JSON.parse(val);
     })
   );
   return BASE_INVENTORY.map((lane) => {
     const live = liveMap[lane.lane_id];
-    const qty = live ? live.qty : lane.base_qty;
+    const qty = live ? live.qty : 0;
     const last_restocked_at = live ? live.last_restocked_at : null;
     return {
       ...lane,
@@ -122,12 +118,11 @@ async function getInventoryAll(kv: KVNamespace): Promise<unknown[]> {
   });
 }
 
-async function getInventoryOne(kv: KVNamespace, lane_id: string): Promise<unknown | null> {
-  await ensureSeeded(kv);
+async function getInventoryOne(kv: KVNamespace, machineId: string, lane_id: string): Promise<unknown | null> {
   const base = BASE_INVENTORY.find((l) => l.lane_id === lane_id);
   if (!base) return null;
-  const val = await kv.get(`inv:${lane_id}`);
-  const live = val ? JSON.parse(val) : { qty: base.base_qty, last_restocked_at: null };
+  const val = await kv.get(`inv:${machineId}:${lane_id}`);
+  const live = val ? JSON.parse(val) : { qty: 0, last_restocked_at: null };
   return { ...base, qty: live.qty, last_restocked_at: live.last_restocked_at, low_stock: live.qty <= base.min_qty };
 }
 
@@ -143,16 +138,15 @@ async function getAllPreorders(kv: KVNamespace): Promise<unknown[]> {
   return items.filter(Boolean).map((v) => JSON.parse(v!));
 }
 
-async function stockPO(kv: KVNamespace, po: any): Promise<void> {
-  await ensureSeeded(kv);
+async function stockPO(kv: KVNamespace, machineId: string, po: any): Promise<void> {
   const now = nowIso();
   for (const item of po.items) {
     const lanes = BASE_INVENTORY.filter((l) => l.sku_id === item.sku_id);
     for (const lane of lanes) {
-      const val = await kv.get(`inv:${lane.lane_id}`);
-      const live = val ? JSON.parse(val) : { qty: lane.base_qty, last_restocked_at: now };
+      const val = await kv.get(`inv:${machineId}:${lane.lane_id}`);
+      const live = val ? JSON.parse(val) : { qty: 0, last_restocked_at: now };
       const newQty = Math.min(live.qty + item.qty, lane.capacity);
-      await kv.put(`inv:${lane.lane_id}`, JSON.stringify({ qty: newQty, last_restocked_at: now }));
+      await kv.put(`inv:${machineId}:${lane.lane_id}`, JSON.stringify({ qty: newQty, last_restocked_at: now }));
     }
     const allPre = await getAllPreorders(kv);
     const matching = (allPre as any[]).filter(
@@ -164,6 +158,13 @@ async function stockPO(kv: KVNamespace, po: any): Promise<void> {
       await kv.put(`pre:${pre.id}`, JSON.stringify(pre));
     }
   }
+}
+
+async function getMachineStats(kv: KVNamespace, machineId: string): Promise<{ total_items: number; low_stock_count: number }> {
+  const inv = (await getInventoryAll(kv, machineId)) as any[];
+  const total_items = inv.reduce((s: number, l: any) => s + (l.qty || 0), 0);
+  const low_stock_count = inv.filter((l: any) => l.low_stock).length;
+  return { total_items, low_stock_count };
 }
 
 async function handleRequest(request: Request, env: Env): Promise<Response> {
@@ -185,6 +186,34 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   if (method === "GET" && path === "/health") {
     return json({ status: "ok", time: nowIso() });
+  }
+
+  // ── Machines endpoints ─────────────────────────────────────────────────────
+  if (method === "GET" && path === "/machines") {
+    const machineList = await Promise.all(
+      Object.values(MACHINES).map(async (m) => {
+        const stats = await getMachineStats(kv, m.id);
+        return { ...m, ...stats };
+      })
+    );
+    return json(machineList);
+  }
+
+  const machineMatch = path.match(/^\/machines\/([^/]+)$/);
+  if (machineMatch && method === "GET") {
+    const mid = machineMatch[1];
+    const machine = MACHINES[mid];
+    if (!machine) return notFound("Machine not found");
+    const stats = await getMachineStats(kv, mid);
+    return json({ ...machine, ...stats });
+  }
+
+  const machineInvMatch = path.match(/^\/machines\/([^/]+)\/inventory$/);
+  if (machineInvMatch && method === "GET") {
+    const mid = machineInvMatch[1];
+    if (!MACHINES[mid]) return notFound("Machine not found");
+    const inv = await getInventoryAll(kv, mid);
+    return json(inv);
   }
 
   if (method === "GET" && path === "/suppliers") {
@@ -217,7 +246,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   if (path === "/purchase-orders") {
     if (method === "POST") {
       const body: any = await request.json();
-      const { supplier_id, items, note, priority } = body;
+      const { supplier_id, items, note, priority, machine_id } = body;
       if (!supplier_id || !SUPPLIERS[supplier_id]) return badRequest("Invalid supplier_id");
       if (!items || !Array.isArray(items) || items.length === 0) return badRequest("items required");
       for (const item of items) {
@@ -229,6 +258,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         id: `PO-${uid()}`,
         supplier_id,
         supplier_name: SUPPLIERS[supplier_id].name,
+        machine_id: machine_id || "vm-001",
         items: items.map((i: any) => ({
           sku_id: i.sku_id,
           sku_name: SKUS[i.sku_id].name,
@@ -289,7 +319,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     po.updated_at = now;
     po.status_history.push({ status: targetStatus, at: now });
     if (targetStatus === "stocked") {
-      await stockPO(kv, po);
+      await stockPO(kv, po.machine_id ?? "vm-001", po);
     }
     await kv.put(`po:${poId}`, JSON.stringify(po));
     return json(po);
@@ -297,8 +327,9 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   if (path === "/inventory") {
     if (method === "GET") {
+      const machineId = url.searchParams.get("machine_id") || "vm-001";
       const lowOnly = url.searchParams.get("low_stock_only") === "true";
-      let inv = (await getInventoryAll(kv)) as any[];
+      let inv = (await getInventoryAll(kv, machineId)) as any[];
       if (lowOnly) inv = inv.filter((i) => i.low_stock);
       return json(inv);
     }
@@ -307,16 +338,17 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   const invLaneMatch = path.match(/^\/inventory\/([^/]+)$/);
   if (invLaneMatch && method === "GET") {
     const laneId = invLaneMatch[1];
-    const lane = await getInventoryOne(kv, laneId);
+    const machineId = url.searchParams.get("machine_id") || "vm-001";
+    const lane = await getInventoryOne(kv, machineId, laneId);
     if (!lane) return notFound("Lane not found");
     return json(lane);
   }
 
   if (path === "/inventory/restock" && method === "POST") {
     const body: any = await request.json();
-    const { po_id, items } = body;
+    const { po_id, items, machine_id } = body;
     if (!items || !Array.isArray(items)) return badRequest("items required");
-    await ensureSeeded(kv);
+    const machineId = machine_id || "vm-001";
     const now = nowIso();
     const results = [];
     for (const item of items) {
@@ -324,10 +356,10 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       const base = BASE_INVENTORY.find((l) => l.lane_id === lane_id);
       if (!base) { results.push({ lane_id, error: "Lane not found" }); continue; }
       if (base.sku_id !== sku_id) { results.push({ lane_id, error: "SKU mismatch" }); continue; }
-      const val = await kv.get(`inv:${lane_id}`);
-      const live = val ? JSON.parse(val) : { qty: base.base_qty, last_restocked_at: now };
+      const val = await kv.get(`inv:${machineId}:${lane_id}`);
+      const live = val ? JSON.parse(val) : { qty: 0, last_restocked_at: now };
       const newQty = Math.min(live.qty + qty, base.capacity);
-      await kv.put(`inv:${lane_id}`, JSON.stringify({ qty: newQty, last_restocked_at: now }));
+      await kv.put(`inv:${machineId}:${lane_id}`, JSON.stringify({ qty: newQty, last_restocked_at: now }));
       results.push({ lane_id, sku_id, added: qty, new_qty: newQty });
     }
     return json({ po_id: po_id || null, restocked_at: now, results });
@@ -393,7 +425,8 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   }
 
   if (path === "/internal/daily-order/preview" && method === "GET") {
-    const inv = (await getInventoryAll(kv)) as any[];
+    const machineId = url.searchParams.get("machine_id") || "vm-001";
+    const inv = (await getInventoryAll(kv, machineId)) as any[];
     const suggestions: any[] = [];
     const bySupplier: Record<string, any[]> = {};
     for (const lane of inv) {
@@ -416,7 +449,8 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   if (path === "/internal/daily-order" && method === "POST") {
     const body: any = await request.json().catch(() => ({}));
     const dry_run = body.dry_run === true;
-    const inv = (await getInventoryAll(kv)) as any[];
+    const machineId = body.machine_id || "vm-001";
+    const inv = (await getInventoryAll(kv, machineId)) as any[];
     const bySupplier: Record<string, any[]> = {};
     for (const lane of inv) {
       if (lane.qty < lane.min_qty) {
@@ -444,6 +478,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
           id: `PO-${uid()}`,
           supplier_id: sid,
           supplier_name: SUPPLIERS[sid].name,
+          machine_id: machineId,
           items: items.map((i: any) => ({ sku_id: i.sku_id, sku_name: SKUS[i.sku_id]?.name || i.sku_id, qty: i.qty, cost_fen: SKUS[i.sku_id]?.cost_fen || 0 })),
           note: "auto daily order",
           priority: "normal",
@@ -465,7 +500,9 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 }
 
 async function runDailyOrder(kv: KVNamespace): Promise<void> {
-  const inv = (await getInventoryAll(kv)) as any[];
+  // Run daily order for vm-001 by default (cron job)
+  const machineId = "vm-001";
+  const inv = (await getInventoryAll(kv, machineId)) as any[];
   const bySupplier: Record<string, any[]> = {};
   for (const lane of inv) {
     if (lane.qty < lane.min_qty) {
@@ -487,6 +524,7 @@ async function runDailyOrder(kv: KVNamespace): Promise<void> {
       id: `PO-${uid()}`,
       supplier_id: sid,
       supplier_name: SUPPLIERS[sid].name,
+      machine_id: machineId,
       items: items.map((i: any) => ({
         sku_id: i.sku_id,
         sku_name: SKUS[i.sku_id]?.name || i.sku_id,
