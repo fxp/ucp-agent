@@ -20,7 +20,7 @@ export interface Env {
 }
 
 const GLM_URL   = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-const GLM_MODEL = "glm-4-flash";
+const GLM_MODEL = "glm-5.1";
 const DEFAULT_WELFARE_YUAN = 50.0;
 const PAYMENT_JWT_TTL = 3600; // 1 hour
 
@@ -407,8 +407,9 @@ function phase1Stream(
     ? `【贩卖机模式】用户正在贩卖机 ${machineId} 旁边。机器已确定，无需询问。` +
       `所有购买操作均使用 machine_id="${machineId}"。简短友好地欢迎用户，直接进入商品浏览。\n\n`
     : `多机器支持：\n` +
-      `- 用户提到具体商品（如"矿泉水"、"可乐"）→ 立即调用 find_item(name=商品名) 查询跨机器库存，` +
-      `直接告知哪台机器有货/缺货，再问用户在哪台机器旁边。\n` +
+      `- 用户提到具体商品（如"矿泉水"、"可乐"）→ 立即调用 find_item(name=商品名) 查询跨机器库存。\n` +
+      `  - 有库存：直接告知"XX机器有货，¥X.XX"，然后问用户是否购买。不要再问用户在哪台机器旁边。\n` +
+      `  - 全部缺货：直接告知"所有机器都缺货"，询问是否创建预订单。\n` +
       `- 用户没提具体商品 → 调用 list_machines 展示列表让用户选择。\n` +
       `禁止：直接调用 list_machines 然后列出机器让用户猜哪台有货——应该先查商品再精准回答。\n\n`;
 
