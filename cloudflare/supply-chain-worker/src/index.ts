@@ -489,6 +489,28 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return json(po);
   }
 
+  // ── Cross-machine item search ──────────────────────────────────────────────
+  if (path === "/inventory/search" && method === "GET") {
+    const q = (url.searchParams.get("name") || url.searchParams.get("q") || "").toLowerCase().trim();
+    if (!q) return badRequest("name or q query param required");
+    const machines = await getAllMachines(kv);
+    const results: any[] = [];
+    for (const m of machines) {
+      const inv = (await getInventoryAll(kv, m.id)) as any[];
+      for (const lane of inv) {
+        if (lane.name.toLowerCase().includes(q) || lane.sku_id.toLowerCase().includes(q)) {
+          results.push({
+            machine_id: m.id, machine_name: m.name, machine_location: m.location,
+            lane_id: lane.lane_id, sku_id: lane.sku_id,
+            name: lane.name, price_fen: lane.price_fen, currency: lane.currency,
+            qty: lane.qty, available: lane.qty > 0, low_stock: lane.low_stock,
+          });
+        }
+      }
+    }
+    return json(results);
+  }
+
   if (path === "/inventory") {
     if (method === "GET") {
       const machineId = url.searchParams.get("machine_id") || "vm-001";

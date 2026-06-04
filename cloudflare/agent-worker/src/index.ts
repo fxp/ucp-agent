@@ -175,8 +175,14 @@ async function buildMandateReal(body: object, privateKeyJwk: string): Promise<st
 
 // ── Tool schemas ───────────────────────────────────────────────────────────────
 const TOOLS = [
+  { type: "function", function: { name: "find_item",
+    description: "跨所有贩卖机搜索指定商品的库存情况，返回每台机器的库存数量和价格。" +
+      "当用户提到具体商品名称时，必须首先调用此工具，而不是 list_machines。",
+    parameters: { type: "object",
+      properties: { name: { type: "string", description: "商品名称关键词，如 矿泉水、可乐、咖啡" }},
+      required: ["name"] }}},
   { type: "function", function: { name: "list_machines",
-    description: "列出所有可用贩卖机及其位置和 ID。当用户想购买商品或询问使用哪台机器时，始终优先调用此工具。",
+    description: "列出所有可用贩卖机及其位置和 ID。仅在用户没有提到具体商品时调用（如询问'附近有什么机器'）。",
     parameters: { type: "object", properties: {}, required: [] }}},
   { type: "function", function: { name: "ucp_discover",
     description: "GET /.well-known/ucp — 发现商户能力和支付处理器。",
@@ -247,6 +253,14 @@ async function execTool(
   base: string, secret: string, env: Env,
 ): Promise<{ status: number; data: unknown }> {
   switch (name) {
+
+    case "find_item": {
+      const q = encodeURIComponent(String(args.name ?? ""));
+      const r = await env.SUPPLY_CHAIN.fetch(new Request(`https://sc/inventory/search?name=${q}`));
+      const results = await r.json().catch(() => []) as any[];
+      // Summarise: group by machine, show availability
+      return { status: r.status, data: results };
+    }
 
     case "list_machines": {
       const r = await env.SUPPLY_CHAIN.fetch(new Request("https://sc/machines", { headers: { "Content-Type": "application/json" } }));
@@ -392,8 +406,11 @@ function phase1Stream(
   const kioskPrefix = machineId
     ? `【贩卖机模式】用户正在贩卖机 ${machineId} 旁边。机器已确定，无需询问。` +
       `所有购买操作均使用 machine_id="${machineId}"。简短友好地欢迎用户，直接进入商品浏览。\n\n`
-    : `多机器支持：购买前必须先确认用户在哪台机器旁边。如果用户没有说明，调用 list_machines 展示列表，` +
-      `让用户选择后再继续。将选定的 machine_id 传递给 ucp_browse_catalog、ucp_create_checkout。\n\n`;
+    : `多机器支持：\n` +
+      `- 用户提到具体商品（如"矿泉水"、"可乐"）→ 立即调用 find_item(name=商品名) 查询跨机器库存，` +
+      `直接告知哪台机器有货/缺货，再问用户在哪台机器旁边。\n` +
+      `- 用户没提具体商品 → 调用 list_machines 展示列表让用户选择。\n` +
+      `禁止：直接调用 list_machines 然后列出机器让用户猜哪台有货——应该先查商品再精准回答。\n\n`;
 
   const systemPrompt =
     `你是 UCP Vending Agent，AI 驱动的自动贩卖机智能购物助手。当前用户: ${userId}\n\n` +
