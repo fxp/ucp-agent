@@ -107,6 +107,19 @@ textarea::placeholder{color:var(--muted)}
 /* ── New chat btn ── */
 .new-chat-btn{display:flex;align-items:center;gap:6px;padding:7px 14px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.3);border-radius:8px;color:#93c5fd;font-size:12px;font-weight:600;cursor:pointer;transition:.15s}
 .new-chat-btn:hover{background:rgba(59,130,246,.2)}
+
+/* ── Payment confirm card ── */
+.pay-confirm-card{background:var(--bg);border:1px solid rgba(59,130,246,.4);border-radius:12px;padding:14px;margin-top:8px;min-width:220px}
+.pay-confirm-title{font-size:13px;font-weight:700;color:#93c5fd;margin-bottom:10px}
+.pay-confirm-row{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);margin-bottom:4px}
+.pay-confirm-row span:last-child{color:var(--text)}
+.pay-confirm-amount{font-size:22px;font-weight:900;color:var(--text);text-align:center;padding:10px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin:10px 0}
+.pay-confirm-btns{display:flex;flex-direction:column;gap:8px}
+.pay-confirm-btn{padding:11px;background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;border-radius:9px;color:#fff;font-size:13px;font-weight:700;cursor:pointer;transition:.15s}
+.pay-confirm-btn:hover{opacity:.85}
+.pay-confirm-btn:disabled{opacity:.4;cursor:not-allowed}
+.pay-cancel-btn{padding:8px;background:transparent;border:1px solid var(--border);border-radius:9px;color:var(--muted);font-size:12px;cursor:pointer;transition:.15s}
+.pay-cancel-btn:hover{border-color:var(--red);color:var(--red)}
 </style>
 </head>
 <body>
@@ -178,6 +191,11 @@ let userId = (() => {
   return id;
 })();
 let sending = false;
+let pendingPayments = {};  // pid → payment_request payload
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 
 // ── Machines ──────────────────────────────────────────────────────────────────
 async function loadMachines() {
@@ -385,6 +403,11 @@ async function sendMessage(msg) {
             text += payload.content;
             renderContent(bubble, text);
             document.getElementById('chatArea').scrollTop = 99999;
+          } else if (curEvent === 'payment_request') {
+            pendingPayments[payload.payment_id] = payload;
+            if (!text) renderContent(bubble, '💳 请确认支付');
+            showPaymentCard(payload, bubble);
+            document.getElementById('chatArea').scrollTop = 99999;
           } else if (curEvent === 'payment_done') {
             orderData = payload;
           } else if (curEvent === 'cashier_url') {
@@ -416,6 +439,92 @@ function handleKey(e) {
 function autoResize(ta) {
   ta.style.height = 'auto';
   ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+}
+
+// ── Payment ───────────────────────────────────────────────────────────────────
+function showPaymentCard(p, bubble) {
+  const pid = p.payment_id;
+  const sym = p.currency === 'CNY' ? '¥' : '$';
+  const amtStr = `${sym}${(p.amount / 100).toFixed(2)}`;
+  const card = document.createElement('div');
+  card.className = 'pay-confirm-card';
+  card.id = `paycard-${pid}`;
+  card.innerHTML = `
+    <div class="pay-confirm-title">💳 支付确认</div>
+    <div class="pay-confirm-row"><span>商品</span><span>${escHtml(p.product_name || '')}</span></div>
+    <div class="pay-confirm-row"><span>金额</span><span>${escHtml(p.currency)}</span></div>
+    <div class="pay-confirm-amount">${escHtml(amtStr)}</div>
+    <div class="pay-confirm-btns">
+      <button class="pay-confirm-btn" id="paybtn-${escHtml(pid)}" onclick="confirmKioskPay('${escHtml(pid)}')">确认支付 ${escHtml(amtStr)}</button>
+      <button class="pay-cancel-btn" onclick="cancelKioskPay('${escHtml(pid)}')">取消</button>
+    </div>`;
+  bubble.appendChild(card);
+}
+
+async function confirmKioskPay(pid) {
+  const p = pendingPayments[pid];
+  if (!p) return;
+  const btn = document.getElementById(`paybtn-${pid}`);
+  if (btn) { btn.disabled = true; btn.textContent = '处理中…'; }
+
+  const bubble2 = appendMsg('ai', '');
+  renderContent(bubble2, '⏳ 正在完成结账…');
+
+  try {
+    const resp = await fetch(`${AGENT}/api/confirm-payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        payment_id: pid,
+        user_id: userId,
+        gpay_token: null,
+        alipay_order_id: null,
+        intent_credential: null,
+      }),
+    });
+
+    const reader2 = resp.body.getReader();
+    const dec2 = new TextDecoder();
+    let buf2 = '', curEv2 = '', text2 = '';
+
+    while (true) {
+      const { done, value } = await reader2.read();
+      if (done) break;
+      buf2 += dec2.decode(value, { stream: true });
+      const lines2 = buf2.split('\n');
+      buf2 = lines2.pop();
+      for (const ln of lines2) {
+        if (ln.startsWith('event:')) { curEv2 = ln.slice(6).trim(); continue; }
+        if (!ln.startsWith('data:')) continue;
+        const raw2 = ln.slice(5).trim();
+        if (!raw2) continue;
+        try {
+          const pl2 = JSON.parse(raw2);
+          if (curEv2 === 'text' && pl2.content) {
+            text2 += pl2.content;
+            renderContent(bubble2, text2);
+            document.getElementById('chatArea').scrollTop = 99999;
+          } else if (curEv2 === 'payment_done') {
+            addOrderCard(bubble2, pl2);
+            if (selectedMachine) loadCatalog(selectedMachine.id);
+            // Auto-reset kiosk after 15s
+            setTimeout(() => newChat(false), 15000);
+          }
+        } catch(e) {}
+        curEv2 = '';
+      }
+    }
+  } catch(e) {
+    renderContent(bubble2, '❌ 支付失败，请重试');
+  }
+  delete pendingPayments[pid];
+}
+
+function cancelKioskPay(pid) {
+  document.getElementById(`paycard-${pid}`)?.remove();
+  delete pendingPayments[pid];
+  const b = appendMsg('ai', '');
+  renderContent(b, '已取消支付。需要购买请再告诉我。');
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
