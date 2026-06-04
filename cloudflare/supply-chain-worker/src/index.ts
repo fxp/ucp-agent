@@ -15,7 +15,6 @@ const MACHINES: Record<string, { id: string; name: string; location: string }> =
   "vm-003": { id: "vm-003", name: "地下停车场", location: "B1 Parking" },
 };
 
-
 interface Sku {
   sku_id: string;
   name: string;
@@ -25,44 +24,39 @@ interface Sku {
   supplier_id: string;
 }
 
-const SKUS: Record<string, Sku> = {
-  "CC-001": { sku_id: "CC-001", name: "无糖可乐 330ml", cost_fen: 180, retail_fen: 350, moq: 24, supplier_id: "COKE_CN" },
-  "CC-002": { sku_id: "CC-002", name: "雪碧无糖 330ml", cost_fen: 180, retail_fen: 350, moq: 24, supplier_id: "COKE_CN" },
-  "CC-003": { sku_id: "CC-003", name: "零卡可乐 500ml", cost_fen: 220, retail_fen: 450, moq: 12, supplier_id: "COKE_CN" },
-  "NF-001": { sku_id: "NF-001", name: "矿泉水 550ml", cost_fen: 90, retail_fen: 200, moq: 48, supplier_id: "NONGFU" },
-  "NF-002": { sku_id: "NF-002", name: "东方树叶绿茶 500ml", cost_fen: 220, retail_fen: 500, moq: 12, supplier_id: "NONGFU" },
-  "NF-003": { sku_id: "NF-003", name: "苏打气泡水 330ml", cost_fen: 200, retail_fen: 400, moq: 24, supplier_id: "NONGFU" },
-  "NF-004": { sku_id: "NF-004", name: "17.5° NFC橙汁 900ml", cost_fen: 950, retail_fen: 1800, moq: 6, supplier_id: "NONGFU" },
-  "MK-001": { sku_id: "MK-001", name: "冰红茶 500ml", cost_fen: 160, retail_fen: 350, moq: 24, supplier_id: "MASTER_KONG" },
-  "MK-002": { sku_id: "MK-002", name: "茉莉蜜茶 500ml", cost_fen: 160, retail_fen: 350, moq: 24, supplier_id: "MASTER_KONG" },
-  "MK-003": { sku_id: "MK-003", name: "矿物质水 550ml", cost_fen: 80, retail_fen: 200, moq: 48, supplier_id: "MASTER_KONG" },
-  "NE-001": { sku_id: "NE-001", name: "雀巢拿铁咖啡 268ml", cost_fen: 600, retail_fen: 1200, moq: 12, supplier_id: "NESTLE" },
-  "NE-002": { sku_id: "NE-002", name: "雀巢美式黑咖啡 268ml", cost_fen: 600, retail_fen: 1200, moq: 12, supplier_id: "NESTLE" },
-  "NE-003": { sku_id: "NE-003", name: "特趣牛奶巧克力 40g", cost_fen: 380, retail_fen: 800, moq: 6, supplier_id: "NESTLE" },
-};
-
-interface BaseLane {
+interface LaneConfig {
   lane_id: string;
+  machine_id: string;
   sku_id: string;
   name: string;
-  base_qty: number;
+  price_fen: number;
+  currency: string;
   min_qty: number;
   capacity: number;
   location: string;
 }
 
-const BASE_INVENTORY: BaseLane[] = [
-  { lane_id: "lane-001", sku_id: "CC-001", name: "无糖可乐 330ml", base_qty: 8, min_qty: 5, capacity: 15, location: "A1" },
-  { lane_id: "lane-002", sku_id: "NF-001", name: "矿泉水 550ml", base_qty: 12, min_qty: 8, capacity: 20, location: "A2" },
-  { lane_id: "lane-003", sku_id: "MK-001", name: "冰红茶 500ml", base_qty: 0, min_qty: 5, capacity: 15, location: "A3" },
-  { lane_id: "lane-004", sku_id: "NF-002", name: "东方树叶绿茶 500ml", base_qty: 3, min_qty: 4, capacity: 12, location: "B1" },
-  { lane_id: "lane-005", sku_id: "NE-001", name: "雀巢拿铁咖啡", base_qty: 6, min_qty: 3, capacity: 10, location: "B2" },
-  { lane_id: "lane-006", sku_id: "NF-003", name: "苏打气泡水 330ml", base_qty: 0, min_qty: 5, capacity: 15, location: "B3" },
-  { lane_id: "lane-007", sku_id: "CC-002", name: "雪碧无糖 330ml", base_qty: 9, min_qty: 5, capacity: 15, location: "C1" },
-  { lane_id: "lane-008", sku_id: "MK-002", name: "茉莉蜜茶 500ml", base_qty: 2, min_qty: 5, capacity: 15, location: "C2" },
-  { lane_id: "lane-009", sku_id: "NE-002", name: "雀巢美式黑咖啡", base_qty: 5, min_qty: 3, capacity: 10, location: "C3" },
-  { lane_id: "lane-010", sku_id: "NF-004", name: "17.5° NFC橙汁", base_qty: 4, min_qty: 2, capacity: 8, location: "D1" },
-];
+async function getSku(kv: KVNamespace, sku_id: string): Promise<Sku | null> {
+  const v = await kv.get(`sku:${sku_id}`);
+  return v ? JSON.parse(v) : null;
+}
+
+async function getAllSkus(kv: KVNamespace): Promise<Sku[]> {
+  const list = await kv.list({ prefix: "sku:" });
+  const items = await Promise.all(list.keys.map(k => kv.get(k.name)));
+  return items.filter(Boolean).map(v => JSON.parse(v!));
+}
+
+async function getLane(kv: KVNamespace, machineId: string, laneId: string): Promise<LaneConfig | null> {
+  const v = await kv.get(`lane:${machineId}:${laneId}`);
+  return v ? JSON.parse(v) : null;
+}
+
+async function getAllLanes(kv: KVNamespace, machineId: string): Promise<LaneConfig[]> {
+  const list = await kv.list({ prefix: `lane:${machineId}:` });
+  const items = await Promise.all(list.keys.map(k => kv.get(k.name)));
+  return items.filter(Boolean).map(v => JSON.parse(v!));
+}
 
 const PO_STATUSES = ["draft", "submitted", "acknowledged", "shipped", "received", "stocked"];
 
@@ -95,35 +89,28 @@ function badRequest(msg: string): Response {
 }
 
 async function getInventoryAll(kv: KVNamespace, machineId: string): Promise<unknown[]> {
-  const list = await kv.list({ prefix: `inv:${machineId}:` });
-  const liveMap: Record<string, { qty: number; last_restocked_at: string }> = {};
-  await Promise.all(
-    list.keys.map(async (k) => {
-      const val = await kv.get(k.name);
-      // key is inv:{machineId}:{lane_id}, extract lane_id
-      const laneId = k.name.slice(`inv:${machineId}:`.length);
-      if (val) liveMap[laneId] = JSON.parse(val);
+  const lanes = await getAllLanes(kv, machineId);
+  return Promise.all(
+    lanes.map(async (lane) => {
+      const val = await kv.get(`inv:${machineId}:${lane.lane_id}`);
+      const live = val ? JSON.parse(val) : { qty: 0, last_restocked_at: null };
+      const qty = live.qty ?? 0;
+      return {
+        ...lane,
+        qty,
+        last_restocked_at: live.last_restocked_at ?? null,
+        low_stock: qty <= lane.min_qty,
+      };
     })
   );
-  return BASE_INVENTORY.map((lane) => {
-    const live = liveMap[lane.lane_id];
-    const qty = live ? live.qty : 0;
-    const last_restocked_at = live ? live.last_restocked_at : null;
-    return {
-      ...lane,
-      qty,
-      last_restocked_at,
-      low_stock: qty <= lane.min_qty,
-    };
-  });
 }
 
 async function getInventoryOne(kv: KVNamespace, machineId: string, lane_id: string): Promise<unknown | null> {
-  const base = BASE_INVENTORY.find((l) => l.lane_id === lane_id);
-  if (!base) return null;
+  const lane = await getLane(kv, machineId, lane_id);
+  if (!lane) return null;
   const val = await kv.get(`inv:${machineId}:${lane_id}`);
   const live = val ? JSON.parse(val) : { qty: 0, last_restocked_at: null };
-  return { ...base, qty: live.qty, last_restocked_at: live.last_restocked_at, low_stock: live.qty <= base.min_qty };
+  return { ...lane, qty: live.qty ?? 0, last_restocked_at: live.last_restocked_at ?? null, low_stock: (live.qty ?? 0) <= lane.min_qty };
 }
 
 async function getAllPOs(kv: KVNamespace): Promise<unknown[]> {
@@ -141,8 +128,10 @@ async function getAllPreorders(kv: KVNamespace): Promise<unknown[]> {
 async function stockPO(kv: KVNamespace, machineId: string, po: any): Promise<void> {
   const now = nowIso();
   for (const item of po.items) {
-    const lanes = BASE_INVENTORY.filter((l) => l.sku_id === item.sku_id);
-    for (const lane of lanes) {
+    // Find all lanes for this machine that carry this SKU
+    const lanes = await getAllLanes(kv, machineId);
+    const matchingLanes = lanes.filter((l) => l.sku_id === item.sku_id);
+    for (const lane of matchingLanes) {
       const val = await kv.get(`inv:${machineId}:${lane.lane_id}`);
       const live = val ? JSON.parse(val) : { qty: 0, last_restocked_at: now };
       const newQty = Math.min(live.qty + item.qty, lane.capacity);
@@ -188,6 +177,48 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     return json({ status: "ok", time: nowIso() });
   }
 
+  // ── SKU CRUD ───────────────────────────────────────────────────────────────────
+  if (path === "/skus") {
+    if (method === "GET") {
+      return json(await getAllSkus(kv));
+    }
+    if (method === "POST") {
+      const body: any = await request.json();
+      const { sku_id, name, cost_fen, retail_fen, moq, supplier_id } = body;
+      if (!sku_id) return badRequest("sku_id required");
+      if (!name) return badRequest("name required");
+      if (typeof cost_fen !== "number") return badRequest("cost_fen required (number)");
+      if (typeof retail_fen !== "number") return badRequest("retail_fen required (number)");
+      if (typeof moq !== "number") return badRequest("moq required (number)");
+      if (!supplier_id) return badRequest("supplier_id required");
+      const sku: Sku = { sku_id, name, cost_fen, retail_fen, moq, supplier_id };
+      await kv.put(`sku:${sku_id}`, JSON.stringify(sku));
+      return json(sku, 201);
+    }
+  }
+
+  const skuMatch = path.match(/^\/skus\/([^/]+)$/);
+  if (skuMatch) {
+    const skuId = skuMatch[1];
+    if (method === "GET") {
+      const sku = await getSku(kv, skuId);
+      if (!sku) return notFound("SKU not found");
+      return json(sku);
+    }
+    if (method === "PUT") {
+      const existing = await getSku(kv, skuId);
+      if (!existing) return notFound("SKU not found");
+      const body: any = await request.json();
+      const updated: Sku = { ...existing, ...body, sku_id: skuId };
+      await kv.put(`sku:${skuId}`, JSON.stringify(updated));
+      return json(updated);
+    }
+    if (method === "DELETE") {
+      await kv.delete(`sku:${skuId}`);
+      return json({ deleted: true, sku_id: skuId });
+    }
+  }
+
   // ── Machines endpoints ─────────────────────────────────────────────────────
   if (method === "GET" && path === "/machines") {
     const machineList = await Promise.all(
@@ -205,7 +236,68 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const machine = MACHINES[mid];
     if (!machine) return notFound("Machine not found");
     const stats = await getMachineStats(kv, mid);
-    return json({ ...machine, ...stats });
+    const lanes = await getAllLanes(kv, mid);
+    return json({ ...machine, ...stats, lanes });
+  }
+
+  // ── Lane config CRUD ───────────────────────────────────────────────────────
+  const machineLanesMatch = path.match(/^\/machines\/([^/]+)\/lanes$/);
+  if (machineLanesMatch) {
+    const mid = machineLanesMatch[1];
+    if (!MACHINES[mid]) return notFound("Machine not found");
+    if (method === "GET") {
+      return json(await getAllLanes(kv, mid));
+    }
+    if (method === "POST") {
+      const body: any = await request.json();
+      const { lane_id, sku_id, name, price_fen, currency, min_qty, capacity, location } = body;
+      if (!lane_id) return badRequest("lane_id required");
+      if (!sku_id) return badRequest("sku_id required");
+      if (!name) return badRequest("name required");
+      if (typeof price_fen !== "number") return badRequest("price_fen required (number)");
+      if (typeof min_qty !== "number") return badRequest("min_qty required (number)");
+      if (typeof capacity !== "number") return badRequest("capacity required (number)");
+      // Validate SKU exists
+      const sku = await getSku(kv, sku_id);
+      if (!sku) return badRequest(`sku_not_found: ${sku_id}`);
+      const lane: LaneConfig = {
+        lane_id, machine_id: mid, sku_id, name,
+        price_fen, currency: currency || "CNY",
+        min_qty, capacity, location: location || "",
+      };
+      await kv.put(`lane:${mid}:${lane_id}`, JSON.stringify(lane));
+      // Initialize inventory entry
+      const existingInv = await kv.get(`inv:${mid}:${lane_id}`);
+      if (!existingInv) {
+        await kv.put(`inv:${mid}:${lane_id}`, JSON.stringify({ qty: 0, last_restocked_at: null }));
+      }
+      return json(lane, 201);
+    }
+  }
+
+  const machineLaneMatch = path.match(/^\/machines\/([^/]+)\/lanes\/([^/]+)$/);
+  if (machineLaneMatch) {
+    const mid = machineLaneMatch[1];
+    const laneId = machineLaneMatch[2];
+    if (!MACHINES[mid]) return notFound("Machine not found");
+    if (method === "PUT") {
+      const existing = await getLane(kv, mid, laneId);
+      if (!existing) return notFound("Lane not found");
+      const body: any = await request.json();
+      // Validate SKU if being changed
+      if (body.sku_id && body.sku_id !== existing.sku_id) {
+        const sku = await getSku(kv, body.sku_id);
+        if (!sku) return badRequest(`sku_not_found: ${body.sku_id}`);
+      }
+      const updated: LaneConfig = { ...existing, ...body, lane_id: laneId, machine_id: mid };
+      await kv.put(`lane:${mid}:${laneId}`, JSON.stringify(updated));
+      return json(updated);
+    }
+    if (method === "DELETE") {
+      await kv.delete(`lane:${mid}:${laneId}`);
+      await kv.delete(`inv:${mid}:${laneId}`);
+      return json({ deleted: true, machine_id: mid, lane_id: laneId });
+    }
   }
 
   const machineInvMatch = path.match(/^\/machines\/([^/]+)\/inventory$/);
@@ -235,7 +327,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const sid = supplierSkuMatch[1];
     if (!SUPPLIERS[sid]) return notFound("Supplier not found");
     const keyword = url.searchParams.get("keyword") || "";
-    let skus = Object.values(SKUS).filter((s) => s.supplier_id === sid);
+    let skus = (await getAllSkus(kv)).filter((s) => s.supplier_id === sid);
     if (keyword) {
       const kw = keyword.toLowerCase();
       skus = skus.filter((s) => s.name.toLowerCase().includes(kw) || s.sku_id.toLowerCase().includes(kw));
@@ -249,9 +341,13 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       const { supplier_id, items, note, priority, machine_id } = body;
       if (!supplier_id || !SUPPLIERS[supplier_id]) return badRequest("Invalid supplier_id");
       if (!items || !Array.isArray(items) || items.length === 0) return badRequest("items required");
+      const resolvedItems: any[] = [];
       for (const item of items) {
-        if (!item.sku_id || !SKUS[item.sku_id]) return badRequest(`Invalid sku_id: ${item.sku_id}`);
+        if (!item.sku_id) return badRequest("sku_id required in items");
+        const sku = await getSku(kv, item.sku_id);
+        if (!sku) return badRequest(`sku_not_found: ${item.sku_id}`);
         if (!item.qty || item.qty < 1) return badRequest("qty must be >= 1");
+        resolvedItems.push({ sku_id: item.sku_id, sku_name: sku.name, qty: item.qty, cost_fen: sku.cost_fen });
       }
       const now = nowIso();
       const po = {
@@ -259,12 +355,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         supplier_id,
         supplier_name: SUPPLIERS[supplier_id].name,
         machine_id: machine_id || "vm-001",
-        items: items.map((i: any) => ({
-          sku_id: i.sku_id,
-          sku_name: SKUS[i.sku_id].name,
-          qty: i.qty,
-          cost_fen: SKUS[i.sku_id].cost_fen,
-        })),
+        items: resolvedItems,
         note: note || "",
         priority: priority || "normal",
         status: "draft",
@@ -353,12 +444,12 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const results = [];
     for (const item of items) {
       const { lane_id, sku_id, qty } = item;
-      const base = BASE_INVENTORY.find((l) => l.lane_id === lane_id);
-      if (!base) { results.push({ lane_id, error: "Lane not found" }); continue; }
-      if (base.sku_id !== sku_id) { results.push({ lane_id, error: "SKU mismatch" }); continue; }
+      const laneConfig = await getLane(kv, machineId, lane_id);
+      if (!laneConfig) { results.push({ lane_id, error: "Lane not found" }); continue; }
+      if (laneConfig.sku_id !== sku_id) { results.push({ lane_id, error: "SKU mismatch" }); continue; }
       const val = await kv.get(`inv:${machineId}:${lane_id}`);
       const live = val ? JSON.parse(val) : { qty: 0, last_restocked_at: now };
-      const newQty = Math.min(live.qty + qty, base.capacity);
+      const newQty = Math.min(live.qty + qty, laneConfig.capacity);
       await kv.put(`inv:${machineId}:${lane_id}`, JSON.stringify({ qty: newQty, last_restocked_at: now }));
       results.push({ lane_id, sku_id, added: qty, new_qty: newQty });
     }
@@ -372,11 +463,17 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       if (!sku_id) return badRequest("sku_id required");
       if (!qty || qty < 1) return badRequest("qty must be >= 1");
       if (!user_id) return badRequest("user_id required");
+      // Look up sku name from KV if not provided
+      let resolvedSkuName = sku_name;
+      if (!resolvedSkuName) {
+        const sku = await getSku(kv, sku_id);
+        resolvedSkuName = sku?.name || sku_id;
+      }
       const now = nowIso();
       const pre = {
         id: `PRE-${uid()}`,
         sku_id,
-        sku_name: sku_name || SKUS[sku_id]?.name || sku_id,
+        sku_name: resolvedSkuName,
         qty,
         user_id,
         note: note || "",
@@ -427,11 +524,10 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   if (path === "/internal/daily-order/preview" && method === "GET") {
     const machineId = url.searchParams.get("machine_id") || "vm-001";
     const inv = (await getInventoryAll(kv, machineId)) as any[];
-    const suggestions: any[] = [];
     const bySupplier: Record<string, any[]> = {};
     for (const lane of inv) {
       if (lane.qty < lane.min_qty) {
-        const sku = SKUS[lane.sku_id];
+        const sku = await getSku(kv, lane.sku_id);
         if (!sku) continue;
         const reorderQty = Math.max(sku.moq, lane.capacity - lane.qty);
         const sid = sku.supplier_id;
@@ -439,9 +535,12 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         bySupplier[sid].push({ lane_id: lane.lane_id, sku_id: lane.sku_id, sku_name: sku.name, current_qty: lane.qty, min_qty: lane.min_qty, reorder_qty: reorderQty, cost_fen: sku.cost_fen * reorderQty });
       }
     }
+    const suggestions: any[] = [];
     for (const [sid, items] of Object.entries(bySupplier)) {
+      const supplier = SUPPLIERS[sid];
+      if (!supplier) continue;
       const total_cost = items.reduce((s, i) => s + i.cost_fen, 0);
-      suggestions.push({ supplier_id: sid, supplier_name: SUPPLIERS[sid].name, min_order_yuan: SUPPLIERS[sid].min_order_yuan, total_cost_fen: total_cost, meets_minimum: total_cost >= SUPPLIERS[sid].min_order_yuan * 100, items });
+      suggestions.push({ supplier_id: sid, supplier_name: supplier.name, min_order_yuan: supplier.min_order_yuan, total_cost_fen: total_cost, meets_minimum: total_cost >= supplier.min_order_yuan * 100, items });
     }
     return json({ preview_at: nowIso(), suggestions });
   }
@@ -454,21 +553,23 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const bySupplier: Record<string, any[]> = {};
     for (const lane of inv) {
       if (lane.qty < lane.min_qty) {
-        const sku = SKUS[lane.sku_id];
+        const sku = await getSku(kv, lane.sku_id);
         if (!sku) continue;
         const reorderQty = Math.max(sku.moq, lane.capacity - lane.qty);
         const sid = sku.supplier_id;
         if (!bySupplier[sid]) bySupplier[sid] = [];
         const existing = bySupplier[sid].find((i: any) => i.sku_id === lane.sku_id);
-        if (existing) { existing.qty += reorderQty; }
-        else bySupplier[sid].push({ sku_id: lane.sku_id, qty: reorderQty });
+        if (existing) { existing.qty += reorderQty; existing.sku = sku; }
+        else bySupplier[sid].push({ sku_id: lane.sku_id, qty: reorderQty, sku });
       }
     }
     const created: any[] = [];
     const skipped: any[] = [];
     for (const [sid, items] of Object.entries(bySupplier)) {
-      const totalCost = items.reduce((s, i) => s + (SKUS[i.sku_id]?.cost_fen || 0) * i.qty, 0);
-      if (totalCost < SUPPLIERS[sid].min_order_yuan * 100) {
+      const supplier = SUPPLIERS[sid];
+      if (!supplier) continue;
+      const totalCost = items.reduce((s, i) => s + (i.sku?.cost_fen || 0) * i.qty, 0);
+      if (totalCost < supplier.min_order_yuan * 100) {
         skipped.push({ supplier_id: sid, reason: "below_min_order", total_cost_fen: totalCost });
         continue;
       }
@@ -477,9 +578,9 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         const po: any = {
           id: `PO-${uid()}`,
           supplier_id: sid,
-          supplier_name: SUPPLIERS[sid].name,
+          supplier_name: supplier.name,
           machine_id: machineId,
-          items: items.map((i: any) => ({ sku_id: i.sku_id, sku_name: SKUS[i.sku_id]?.name || i.sku_id, qty: i.qty, cost_fen: SKUS[i.sku_id]?.cost_fen || 0 })),
+          items: items.map((i: any) => ({ sku_id: i.sku_id, sku_name: i.sku?.name || i.sku_id, qty: i.qty, cost_fen: i.sku?.cost_fen || 0 })),
           note: "auto daily order",
           priority: "normal",
           status: "draft",
@@ -490,7 +591,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
         await kv.put(`po:${po.id}`, JSON.stringify(po));
         created.push(po);
       } else {
-        created.push({ supplier_id: sid, items, total_cost_fen: totalCost, dry_run: true });
+        created.push({ supplier_id: sid, items: items.map(i => ({ sku_id: i.sku_id, qty: i.qty })), total_cost_fen: totalCost, dry_run: true });
       }
     }
     return json({ dry_run, created_at: nowIso(), created, skipped }, dry_run ? 200 : 201);
@@ -500,36 +601,37 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 }
 
 async function runDailyOrder(kv: KVNamespace): Promise<void> {
-  // Run daily order for vm-001 by default (cron job)
   const machineId = "vm-001";
   const inv = (await getInventoryAll(kv, machineId)) as any[];
   const bySupplier: Record<string, any[]> = {};
   for (const lane of inv) {
     if (lane.qty < lane.min_qty) {
-      const sku = SKUS[lane.sku_id];
+      const sku = await getSku(kv, lane.sku_id);
       if (!sku) continue;
       const reorderQty = Math.max(sku.moq, lane.capacity - lane.qty);
       const sid = sku.supplier_id;
       if (!bySupplier[sid]) bySupplier[sid] = [];
       const existing = bySupplier[sid].find((i: any) => i.sku_id === lane.sku_id);
-      if (existing) { existing.qty += reorderQty; }
-      else bySupplier[sid].push({ sku_id: lane.sku_id, qty: reorderQty });
+      if (existing) { existing.qty += reorderQty; existing.sku = sku; }
+      else bySupplier[sid].push({ sku_id: lane.sku_id, qty: reorderQty, sku });
     }
   }
   for (const [sid, items] of Object.entries(bySupplier)) {
-    const totalCost = items.reduce((s, i) => s + (SKUS[i.sku_id]?.cost_fen || 0) * i.qty, 0);
-    if (totalCost < SUPPLIERS[sid].min_order_yuan * 100) continue;
+    const supplier = SUPPLIERS[sid];
+    if (!supplier) continue;
+    const totalCost = items.reduce((s, i) => s + (i.sku?.cost_fen || 0) * i.qty, 0);
+    if (totalCost < supplier.min_order_yuan * 100) continue;
     const now = nowIso();
     const po: any = {
       id: `PO-${uid()}`,
       supplier_id: sid,
-      supplier_name: SUPPLIERS[sid].name,
+      supplier_name: supplier.name,
       machine_id: machineId,
       items: items.map((i: any) => ({
         sku_id: i.sku_id,
-        sku_name: SKUS[i.sku_id]?.name || i.sku_id,
+        sku_name: i.sku?.name || i.sku_id,
         qty: i.qty,
-        cost_fen: SKUS[i.sku_id]?.cost_fen || 0,
+        cost_fen: i.sku?.cost_fen || 0,
       })),
       note: "cron auto daily order",
       priority: "normal",

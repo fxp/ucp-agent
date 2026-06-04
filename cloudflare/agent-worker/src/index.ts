@@ -171,15 +171,7 @@ async function buildMandateReal(body: object, privateKeyJwk: string): Promise<st
   return `${h}.${p}.${sigB64}`;
 }
 
-// ── Mock supplier SKUs (inline, no external call needed) ──────────────────────
-const MOCK_SKUS = [
-  { sku_id: "YY-001", name: "无糖可乐 330ml",    brand: "可口可乐", price_cents: 220, eta_days: 2 },
-  { sku_id: "YY-002", name: "东方树叶绿茶 500ml", brand: "农夫山泉", price_cents: 320, eta_days: 2 },
-  { sku_id: "YY-003", name: "苏打气泡水 330ml",   brand: "农夫山泉", price_cents: 380, eta_days: 3 },
-  { sku_id: "YY-004", name: "雀巢拿铁咖啡 268ml","brand": "雀巢",    price_cents: 600, eta_days: 3 },
-  { sku_id: "YY-005", name: "矿泉水 550ml",       brand: "农夫山泉", price_cents: 150, eta_days: 1 },
-  { sku_id: "YY-006", name: "茉莉蜜茶 500ml",     brand: "康师傅",  price_cents: 160, eta_days: 2 },
-];
+// MOCK_SKUS removed — supplier SKUs are now dynamically fetched from supply-chain KV.
 
 // ── Tool schemas ───────────────────────────────────────────────────────────────
 const TOOLS = [
@@ -319,16 +311,24 @@ async function execTool(
     }
 
     case "query_supplier_sku": {
-      const kw = String(args.keyword ?? "").toLowerCase();
-      const matches = MOCK_SKUS.filter(s =>
-        s.name.toLowerCase().includes(kw) || s.brand.toLowerCase().includes(kw)
-      );
+      const kw = String(args.keyword ?? "");
+      // Fetch all SKUs from supply-chain KV
+      const { status, data } = await scGet(sc, "/skus");
+      if (status !== 200) return { status, data };
+      const skus = data as Array<{ sku_id: string; name: string; supplier_id: string; cost_fen: number; retail_fen: number; moq: number }>;
+      const kwLower = kw.toLowerCase();
+      const matches = kwLower
+        ? skus.filter(s => s.name.toLowerCase().includes(kwLower) || s.sku_id.toLowerCase().includes(kwLower) || s.supplier_id.toLowerCase().includes(kwLower))
+        : skus;
       return { status: 200, data: {
-        source: "mock",
-        keyword: args.keyword,
-        results: (matches.length ? matches : MOCK_SKUS.slice(0, 3)).map(s => ({
-          ...s, price_yuan: `¥${(s.price_cents / 100).toFixed(2)}`,
-          eta: `${s.eta_days} 天内到货`,
+        source: "supply_chain_kv",
+        keyword: kw,
+        total: skus.length,
+        results: matches.map(s => ({
+          sku_id: s.sku_id, name: s.name, supplier_id: s.supplier_id,
+          cost_yuan: `¥${(s.cost_fen / 100).toFixed(2)}`,
+          retail_yuan: `¥${(s.retail_fen / 100).toFixed(2)}`,
+          moq: s.moq,
         })),
       }};
     }
@@ -393,13 +393,15 @@ function phase1Stream(
     `多机器支持：系统有多台贩卖机（vm-001 1楼大厅、vm-002 2楼会议区、vm-003 地下停车场）。\n` +
     `购买前必须先确认用户在哪台机器旁边。如果用户没有说明，调用 list_machines 展示列表，\n` +
     `让用户选择后再继续。将选定的 machine_id 传递给 ucp_browse_catalog、ucp_create_checkout。\n\n` +
+    `商品目录完全动态：货道和商品由管理员通过供应链系统配置，没有预设商品。\n` +
+    `ucp_browse_catalog 返回实时货道列表；如果返回空列表，说明此机器尚未配置商品。\n\n` +
     `标准购买流程（严格按序执行，不要等用户二次确认）：\n` +
     `1. list_machines（如果 machine_id 未知）  2. ucp_discover  3. ucp_get_token\n` +
     `4. get_welfare_balance(user_id="${userId}")\n` +
     `5. ucp_browse_catalog(machine_id=已选机器) — 根据用户描述自动选最匹配商品\n` +
     `6. ucp_create_checkout(machine_id=已选机器)  7. ucp_request_payment\n` +
     `   ⚠️ ucp_request_payment 调用后立刻停止，等待支付确认，不要调用 complete。\n\n` +
-    `缺货：query_supplier_sku → create_preorder → notify_ops。\n` +
+    `缺货：query_supplier_sku（从供应链 KV 查询已录入 SKU）→ create_preorder → notify_ops。\n` +
     `供应链：get_inventory(machine_id=...) / preview_daily_order / trigger_daily_order。\n` +
     `价格用 ¥X.XX 格式，回复简洁直接。`;
 
