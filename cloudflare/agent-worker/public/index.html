@@ -7,6 +7,8 @@
 <script async src="https://pay.google.com/gp/p/js/pay.js" onload="_initGPay()"></script>
 <!-- face-api.js: open-source face detection + recognition (MIT) -->
 <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<!-- qrcodejs: client-side QR code generation (MIT) -->
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
 <style>
 /* ── Reset & base ── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -524,11 +526,14 @@ function addOrderCard(orderId, amount, product, events, pickupCode, pickupUrl) {
       <div class="tl-name">${esc(ev)}</div>
     </div>`).join('');
 
+  const qrId = 'qr-' + Math.random().toString(36).slice(2, 9);
   const pickupSection = pickupCode ? `
-    <div style="margin-top:12px;padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
-      <div style="font-size:11px;color:var(--muted);margin-bottom:6px">🏪 前往自动贩卖机扫码取货</div>
-      <div style="font-family:monospace;font-size:26px;font-weight:800;letter-spacing:4px;color:var(--blue);text-align:center;padding:6px 0">${esc(pickupCode)}</div>
-      <a href="${esc(pickupUrl || '')}" target="_blank" style="display:block;margin-top:8px;padding:8px;background:var(--blue-bg);color:var(--blue);border-radius:6px;text-align:center;font-size:12px;font-weight:700;text-decoration:none">
+    <div style="margin-top:12px;padding:14px;background:var(--bg);border-radius:10px;border:1px solid var(--border);text-align:center">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;font-weight:600">🏪 将手机出示给贩卖机扫码取货</div>
+      <div id="${qrId}" style="display:inline-block;padding:8px;background:#fff;border-radius:8px;margin-bottom:10px"></div>
+      <div style="font-family:monospace;font-size:22px;font-weight:800;letter-spacing:5px;color:var(--blue);padding:4px 0">${esc(pickupCode)}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:4px">或前往贩卖机屏幕手动输入上方取货码</div>
+      <a href="${esc(pickupUrl || '')}" target="_blank" style="display:block;margin-top:10px;padding:7px;background:var(--blue-bg);color:var(--blue);border-radius:6px;font-size:12px;font-weight:700;text-decoration:none">
         打开贩卖机页面 →
       </a>
     </div>` : '';
@@ -548,6 +553,17 @@ function addOrderCard(orderId, amount, product, events, pickupCode, pickupUrl) {
       </div>
     </div>`;
   chat.appendChild(el);
+  // Generate QR code after element is in DOM
+  if (pickupCode && pickupUrl && window.QRCode) {
+    try {
+      new window.QRCode(document.getElementById(qrId), {
+        text: pickupUrl,
+        width: 160, height: 160,
+        colorDark: '#1e40af', colorLight: '#ffffff',
+        correctLevel: window.QRCode.CorrectLevel.M,
+      });
+    } catch (e) { console.warn('QR generation failed', e); }
+  }
   scrollChat();
 }
 
