@@ -363,6 +363,7 @@ async function sendMessage(msg) {
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
+    let curEvent = '';   // tracks current SSE event type
 
     while (true) {
       const { done, value } = await reader.read();
@@ -371,19 +372,26 @@ async function sendMessage(msg) {
       const lines = buf.split('\n');
       buf = lines.pop();
       for (const line of lines) {
+        if (line.startsWith('event:')) {
+          curEvent = line.slice(6).trim();
+          continue;
+        }
         if (!line.startsWith('data:')) continue;
+        const raw = line.slice(5).trim();
+        if (!raw) continue;
         try {
-          const ev = JSON.parse(line.slice(5).trim());
-          if (ev.type === 'text' && ev.data?.content) {
-            text += ev.data.content;
+          const payload = JSON.parse(raw);
+          if (curEvent === 'text' && payload.content) {
+            text += payload.content;
             renderContent(bubble, text);
             document.getElementById('chatArea').scrollTop = 99999;
-          } else if (ev.type === 'payment_done') {
-            orderData = ev.data;
-          } else if (ev.type === 'cashier_url') {
-            cashierUrl = ev.data.cashier_url;
+          } else if (curEvent === 'payment_done') {
+            orderData = payload;
+          } else if (curEvent === 'cashier_url') {
+            cashierUrl = payload.cashier_url;
           }
         } catch(e) {}
+        curEvent = '';
       }
     }
 
