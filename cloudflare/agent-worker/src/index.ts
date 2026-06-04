@@ -387,16 +387,21 @@ function phase1Stream(
   userMessage: string, userId: string, threadId: string,
   mock: Fetcher, sc: Fetcher, kv: KVNamespace,
   base: string, env: Env,
+  machineId?: string,  // kiosk mode: machine is pre-selected
 ): ReadableStream {
+  const kioskPrefix = machineId
+    ? `【贩卖机模式】用户正在贩卖机 ${machineId} 旁边。机器已确定，无需询问。` +
+      `所有购买操作均使用 machine_id="${machineId}"。简短友好地欢迎用户，直接进入商品浏览。\n\n`
+    : `多机器支持：购买前必须先确认用户在哪台机器旁边。如果用户没有说明，调用 list_machines 展示列表，` +
+      `让用户选择后再继续。将选定的 machine_id 传递给 ucp_browse_catalog、ucp_create_checkout。\n\n`;
+
   const systemPrompt =
     `你是 UCP Vending Agent，AI 驱动的自动贩卖机智能购物助手。当前用户: ${userId}\n\n` +
-    `多机器支持：系统有多台贩卖机（vm-001 1楼大厅、vm-002 2楼会议区、vm-003 地下停车场）。\n` +
-    `购买前必须先确认用户在哪台机器旁边。如果用户没有说明，调用 list_machines 展示列表，\n` +
-    `让用户选择后再继续。将选定的 machine_id 传递给 ucp_browse_catalog、ucp_create_checkout。\n\n` +
+    kioskPrefix +
     `商品目录完全动态：货道和商品由管理员通过供应链系统配置，没有预设商品。\n` +
     `ucp_browse_catalog 返回实时货道列表；如果返回空列表，说明此机器尚未配置商品。\n\n` +
     `标准购买流程（严格按序执行，不要等用户二次确认）：\n` +
-    `1. list_machines（如果 machine_id 未知）  2. ucp_discover  3. ucp_get_token\n` +
+    `1. ${machineId ? "（机器已知，跳过）" : "list_machines（如果 machine_id 未知）"}  2. ucp_discover  3. ucp_get_token\n` +
     `4. get_welfare_balance(user_id="${userId}")\n` +
     `5. ucp_browse_catalog(machine_id=已选机器) — 根据用户描述自动选最匹配商品\n` +
     `6. ucp_create_checkout(machine_id=已选机器)  7. ucp_request_payment\n` +
@@ -735,9 +740,10 @@ export default {
       const msg  = (body.message ?? "").trim();
       const uid  = body.user_id || "guest";
       const tid  = body.thread_id || "";
+      const mid  = body.machine_id || "";   // kiosk mode: pre-selected machine
       if (!msg) return jsonResp({ error: "empty" }, 400);
       return new Response(
-        phase1Stream(msg, uid, tid, env.MOCK, env.SUPPLY_CHAIN, env.WELFARE_KV, base, env),
+        phase1Stream(msg, uid, tid, env.MOCK, env.SUPPLY_CHAIN, env.WELFARE_KV, base, env, mid || undefined),
         { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache",
           "X-Accel-Buffering": "no", "Access-Control-Allow-Origin": "*" }});
     }
