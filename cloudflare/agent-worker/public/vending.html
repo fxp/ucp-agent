@@ -43,6 +43,16 @@ nav {
 .nav-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 .refresh-info { font-size: 12px; color: var(--muted); }
 #countdown { color: var(--blue); font-weight: 600; }
+.countdown-ring .ring-bg   { fill: none; stroke: var(--border); stroke-width: 2.5; }
+.countdown-ring .ring-fill {
+  fill: none; stroke: var(--blue); stroke-width: 2.5; stroke-linecap: round;
+  transform-origin: center; transform: rotate(-90deg);
+  transition: stroke-dashoffset .95s linear;
+}
+.countdown-ring.refreshing .ring-fill {
+  stroke: var(--muted); animation: spin .8s linear infinite; transition: none;
+}
+@keyframes spin { to { transform: rotate(-90deg) rotate(360deg); } }
 .btn-refresh {
   padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--bg3); color: var(--text); font-size: 12px; cursor: pointer;
@@ -290,7 +300,10 @@ tr:hover td { background: var(--bg3); }
     <a href="/supplier">供应链</a>
   </div>
   <div class="nav-right">
-    <span class="refresh-info">自动刷新 <span id="countdown">10</span>s</span>
+    <svg class="countdown-ring" id="countdownRing" width="20" height="20" viewBox="0 0 20 20">
+      <circle class="ring-bg"   cx="10" cy="10" r="7"/>
+      <circle class="ring-fill" cx="10" cy="10" r="7" id="countdownArc"/>
+    </svg>
     <button class="btn-refresh" onclick="manualRefresh()">↻ 刷新</button>
   </div>
 </nav>
@@ -476,16 +489,24 @@ function showToast(msg) {
 }
 
 /* ── Countdown ── */
+const RING_CIRC = 2 * Math.PI * 7;
+
+function setRingProgress(ratio) {
+  const arc = document.getElementById('countdownArc');
+  if (!arc) return;
+  arc.style.strokeDasharray  = RING_CIRC;
+  arc.style.strokeDashoffset = RING_CIRC * (1 - Math.max(0, Math.min(1, ratio)));
+}
+
 function startCountdown() {
   clearInterval(countdownTimer);
   countdownVal = 10;
-  document.getElementById('countdown').textContent = countdownVal;
+  setRingProgress(1);
+  document.getElementById('countdownRing')?.classList.remove('refreshing');
   countdownTimer = setInterval(() => {
     countdownVal--;
-    document.getElementById('countdown').textContent = Math.max(0, countdownVal);
-    if (countdownVal <= 0) {
-      clearInterval(countdownTimer);
-    }
+    setRingProgress(Math.max(0, countdownVal) / 10);
+    if (countdownVal <= 0) clearInterval(countdownTimer);
   }, 1000);
 }
 
@@ -511,6 +532,7 @@ async function fetchJSON(url) {
 
 /* ── Main refresh ── */
 async function refresh() {
+  document.getElementById('countdownRing')?.classList.add('refreshing');
   startCountdown();
   const inventoryUrl = `${SC_BASE}/inventory?machine_id=${encodeURIComponent(selectedMachine)}`;
   const dailyUrl     = `${SC_BASE}/internal/daily-order/preview?machine_id=${encodeURIComponent(selectedMachine)}`;
@@ -545,6 +567,7 @@ async function refresh() {
     document.getElementById('daily-order-section').innerHTML = '<div class="empty-state">采购计划加载失败</div>';
   }
 
+  document.getElementById('countdownRing')?.classList.remove('refreshing');
   scheduleRefresh();
 }
 
