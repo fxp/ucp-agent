@@ -205,6 +205,35 @@ const TOOLS = [
         machine_id: { type: "string", description: "贩卖机 ID，如 vm-001。默认 vm-001。" },
       },
       required: ["token", "lane_id"] }}},
+  { type: "function", function: { name: "ucp_get_checkout",
+    description: "GET /checkout-sessions/{id} — 查询结账会话当前状态（status/totals/messages）。" +
+      "在 complete 前确认状态为 ready_for_complete 时使用。",
+    parameters: { type: "object",
+      properties: {
+        token:       { type: "string" },
+        checkout_id: { type: "string", description: "结账会话 ID" },
+      },
+      required: ["token", "checkout_id"] }}},
+  { type: "function", function: { name: "ucp_update_checkout",
+    description: "PUT /checkout-sessions/{id} — 更新结账会话（整体替换）。" +
+      "用于：应用优惠码(discounts)、更新买家信息、变更商品。" +
+      "返回新的 checkout_session_id（如有折扣则重新签名），和 totals（含 discount 行）。" +
+      "完成后必须用新 checkout_session_id 调用 ucp_request_payment。",
+    parameters: { type: "object",
+      properties: {
+        token:       { type: "string" },
+        checkout_id: { type: "string" },
+        discount_code: { type: "string", description: "优惠码，如 SAVE10 / VEND20。留空则不应用折扣。" },
+      },
+      required: ["token", "checkout_id"] }}},
+  { type: "function", function: { name: "ucp_cancel_checkout",
+    description: "POST /checkout-sessions/{id}/cancel — 取消结账会话。用户放弃购买时调用。",
+    parameters: { type: "object",
+      properties: {
+        token:       { type: "string" },
+        checkout_id: { type: "string" },
+      },
+      required: ["token", "checkout_id"] }}},
   { type: "function", function: { name: "ucp_request_payment",
     description: "发起支付请求（流程暂停等用户确认）。amount 单位为分。",
     parameters: { type: "object",
@@ -278,6 +307,26 @@ async function execTool(
     case "ucp_browse_catalog": {
       const mid = String(args.machine_id ?? "vm-001");
       return mockPost(mock, `/cart-sessions?machine_id=${encodeURIComponent(mid)}`, base, {}, args.token as string);
+    }
+
+    case "ucp_get_checkout": {
+      const cid = encodeURIComponent(String(args.checkout_id ?? ""));
+      return mockGet(mock, `/checkout-sessions/${cid}`, base, args.token as string);
+    }
+
+    case "ucp_update_checkout": {
+      const cid = encodeURIComponent(String(args.checkout_id ?? ""));
+      const body: Record<string, unknown> = {};
+      if (args.discount_code) body.discounts = [{ code: args.discount_code }];
+      const r = await mock.fetch(new Request(`https://mock/checkout-sessions/${cid}`, {
+        method: "PUT", body: JSON.stringify(body), headers: ucpHeaders(base, args.token as string),
+      }));
+      return { status: r.status, data: await r.json().catch(() => ({})) };
+    }
+
+    case "ucp_cancel_checkout": {
+      const cid = encodeURIComponent(String(args.checkout_id ?? ""));
+      return mockPost(mock, `/checkout-sessions/${cid}/cancel`, base, {}, args.token as string);
     }
 
     case "ucp_create_checkout": {
@@ -419,14 +468,20 @@ function phase1Stream(
     kioskPrefix +
     `商品目录完全动态：货道和商品由管理员通过供应链系统配置，没有预设商品。\n` +
     `ucp_browse_catalog 返回实时货道列表；如果返回空列表，说明此机器尚未配置商品。\n\n` +
-    `标准购买流程（严格按序执行，不要等用户二次确认）：\n` +
-    `1. ${machineId ? "（机器已知，跳过）" : "list_machines（如果 machine_id 未知）"}  2. ucp_discover  3. ucp_get_token\n` +
+    `标准购买流程（严格按序，不要停下来等用户二次确认）：\n` +
+    `1. ${machineId ? "（机器已知，跳过）" : "list_machines（machine_id 未知时）"}  2. ucp_discover  3. ucp_get_token\n` +
     `4. get_welfare_balance(user_id="${userId}")\n` +
     `5. ucp_browse_catalog(machine_id=已选机器) — 根据用户描述自动选最匹配商品\n` +
-    `6. ucp_create_checkout(machine_id=已选机器)  7. ucp_request_payment\n` +
-    `   ⚠️ ucp_request_payment 调用后立刻停止，等待支付确认，不要调用 complete。\n\n` +
-    `缺货：query_supplier_sku（从供应链 KV 查询已录入 SKU）→ create_preorder → notify_ops。\n` +
-    `供应链：get_inventory(machine_id=...) / preview_daily_order / trigger_daily_order。\n` +
+    `6. ucp_create_checkout(machine_id=已选机器) → 获得 checkout_id\n` +
+    `7. [可选] 用户有优惠码 → ucp_update_checkout(discount_code=XXX) — 注意用返回的新 checkout_id\n` +
+    `8. ucp_request_payment  ⚠️ 调用后立刻停止，等待用户支付，不要继续调用其他工具。\n\n` +
+    `会话管理：\n` +
+    `- ucp_get_checkout(checkout_id) — 查询会话状态（ready_for_complete / incomplete）\n` +
+    `- ucp_update_checkout(checkout_id, discount_code) — 应用优惠码（PUT 整体替换，返回含 discount 行的 totals）\n` +
+    `- ucp_cancel_checkout(checkout_id) — 用户取消时调用，释放会话\n\n` +
+    `折扣码（demo）：SAVE10=九折, VEND20=八折\n` +
+    `缺货：query_supplier_sku → create_preorder → notify_ops\n` +
+    `供应链：get_inventory(machine_id=...) / preview_daily_order / trigger_daily_order\n` +
     `价格用 ¥X.XX 格式，回复简洁直接。`;
 
   return new ReadableStream({
