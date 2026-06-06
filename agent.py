@@ -36,7 +36,7 @@ from openai import OpenAI
 
 PORT         = int(os.environ.get("AGENT_PORT", 8090))
 MERCHANT_URL = os.environ.get("MERCHANT_URL", "http://localhost:8080")
-GLM_API_KEY  = os.environ.get("GLM_API_KEY", "1790d449b46d437bbc8b101815048d64.lEMGH4tememSXbvH")
+GLM_API_KEY  = os.environ.get("GLM_API_KEY", "")
 GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
 GLM_MODEL    = "glm-4-flash"
 AGENT_BASE   = f"http://localhost:{PORT}"
