@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>供应链 Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d1117;
+    --card: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --blue: #58a6ff;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #39c5cf;
+    --gray: #6e7681;
+    --radius: 8px;
+  }
+  html, body { height: 100%; }
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  /* NAV */
+  nav {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 24px;
+    height: 52px;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+  }
+  nav .nav-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+  }
+  nav .nav-title i { color: var(--blue); }
+  nav .nav-links { display: flex; gap: 12px; align-items: center; }
+  nav .nav-links a {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 13px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    transition: color .15s, border-color .15s;
+  }
+  nav .nav-links a:hover { color: var(--text); border-color: var(--blue); }
+  nav .nav-right { display: flex; align-items: center; gap: 12px; }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); display: inline-block; flex-shrink: 0;
+    transition: background .4s;
+  }
+  .status-dot.connected    { background: var(--green); box-shadow: 0 0 5px var(--green); }
+  .status-dot.connecting   { background: var(--yellow); animation: blink .7s infinite; }
+  .status-dot.disconnected { background: var(--red);    animation: blink .7s infinite; }
+  .status-label { font-size: 11px; color: var(--muted); }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.25} }
+  #refreshBtn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    transition: border-color .15s, color .15s;
+  }
+  #refreshBtn:hover { border-color: var(--blue); color: var(--blue); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* MAIN LAYOUT */
+  main { max-width: 1400px; margin: 0 auto; padding: 24px; }
+  section { margin-bottom: 32px; }
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-header h2 { font-size: 15px; font-weight: 600; }
+  .section-header i { color: var(--blue); }
+  .section-header .badge-count {
+    background: var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 20px;
+  }
+
+  /* KPI CARDS */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-bottom: 32px;
+  }
+  @media (max-width: 900px) { .kpi-row { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 500px) { .kpi-row { grid-template-columns: 1fr; } }
+  .kpi-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .kpi-card .kpi-label { font-size: 12px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .5px; }
+  .kpi-card .kpi-value { font-size: 32px; font-weight: 700; line-height: 1; }
+  .kpi-card .kpi-icon { font-size: 18px; color: var(--muted); margin-bottom: 4px; }
+  .kpi-card.danger .kpi-value { color: var(--red); }
+  .kpi-card.warn .kpi-value { color: var(--yellow); }
+  .kpi-card.ok .kpi-value { color: var(--green); }
+  .kpi-card.info .kpi-value { color: var(--blue); }
+
+  /* INVENTORY GRID */
+  .inventory-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+  }
+  @media (max-width: 960px) { .inventory-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 580px) { .inventory-grid { grid-template-columns: 1fr; } }
+  .lane-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    border-left: 3px solid var(--border);
+    position: relative;
+  }
+  .lane-card.low-stock { border-left-color: var(--red); }
+  .lane-card .lane-header { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .lane-loc {
+    background: var(--border);
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-family: monospace;
+    letter-spacing: .5px;
+  }
+  .lane-card .lane-name { font-size: 13px; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .lane-sku { font-size: 11px; color: var(--muted); margin-bottom: 8px; font-family: monospace; }
+  .stock-bar-wrap { margin-bottom: 6px; }
+  .stock-bar-bg {
+    background: var(--border);
+    border-radius: 4px;
+    height: 6px;
+    overflow: hidden;
+  }
+  .stock-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    transition: width .4s;
+  }
+  .stock-bar-fill.red { background: var(--red); }
+  .stock-bar-fill.yellow { background: var(--yellow); }
+  .stock-bar-fill.green { background: var(--green); }
+  .stock-bar-info { display: flex; justify-content: space-between; margin-top: 5px; font-size: 12px; }
+  .stock-qty { color: var(--text); font-weight: 600; }
+  .stock-restocked { color: var(--muted); }
+
+  /* DAILY ORDER PREVIEW */
+  .preview-empty { color: var(--muted); font-size: 14px; padding: 20px; text-align: center; }
+  .supplier-preview-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .supplier-preview-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .supplier-preview-header:hover { background: rgba(88,166,255,.04); }
+  .supplier-badge {
+    background: rgba(88,166,255,.15);
+    color: var(--blue);
+    font-weight: 600;
+    font-size: 13px;
+    padding: 3px 10px;
+    border-radius: 4px;
+  }
+  .meets-min { font-size: 12px; font-weight: 600; }
+  .meets-min.ok { color: var(--green); }
+  .meets-min.fail { color: var(--red); }
+  .preview-cost { margin-left: auto; font-size: 14px; font-weight: 600; color: var(--text); }
+  .preview-toggle { color: var(--muted); font-size: 12px; transition: transform .2s; }
+  .preview-toggle.open { transform: rotate(180deg); }
+  .supplier-preview-items {
+    display: none;
+    padding: 0 16px 14px;
+    border-top: 1px solid var(--border);
+  }
+  .supplier-preview-items.open { display: block; }
+  .preview-item-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+  .preview-item-row:last-child { border-bottom: none; }
+  .preview-item-name { color: var(--text); }
+  .preview-item-qty { color: var(--muted); }
+  .preview-item-qty .arrow { color: var(--blue); margin: 0 4px; }
+  .preview-actions { margin-top: 16px; display: flex; align-items: center; gap: 12px; }
+
+  /* TABLES */
+  .table-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border); }
+  table { width: 100%; border-collapse: collapse; background: var(--card); }
+  thead th {
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .4px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+    background: rgba(22,27,34,.8);
+  }
+  tbody tr { border-bottom: 1px solid var(--border); transition: background .1s; }
+  tbody tr:last-child { border-bottom: none; }
+  tbody tr:hover { background: rgba(88,166,255,.03); }
+  tbody td { padding: 10px 14px; font-size: 13px; vertical-align: middle; }
+  .empty-row td { text-align: center; color: var(--muted); padding: 28px 14px; }
+
+  /* STATUS BADGES */
+  .status-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .3px;
+  }
+  .status-draft { background: rgba(110,118,129,.2); color: var(--gray); }
+  .status-submitted { background: rgba(88,166,255,.15); color: var(--blue); }
+  .status-acknowledged { background: rgba(57,197,207,.15); color: var(--cyan); }
+  .status-shipped { background: rgba(210,153,34,.15); color: var(--yellow); }
+  .status-received { background: rgba(63,185,80,.15); color: var(--green); }
+  .status-stocked { background: rgba(188,140,255,.15); color: var(--purple); }
+  .status-pending { background: rgba(210,153,34,.15); color: var(--yellow); }
+  .status-stock_arrived { background: rgba(88,166,255,.15); color: var(--blue); }
+  .status-notified { background: rgba(63,185,80,.15); color: var(--green); }
+
+  /* BUTTONS */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 12px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: opacity .15s, transform .1s;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
+  .btn-primary { background: var(--blue); color: #0d1117; border-color: var(--blue); }
+  .btn-primary:hover { opacity: .85; }
+  .btn-outline { background: transparent; color: var(--text); border-color: var(--border); }
+  .btn-outline:hover { border-color: var(--blue); color: var(--blue); }
+  .btn-green { background: var(--green); color: #0d1117; border-color: var(--green); }
+  .btn-green:hover { opacity: .85; }
+  .btn-sm { padding: 3px 9px; font-size: 11px; }
+
+  /* SUPPLIER INFO CARDS */
+  .supplier-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+  }
+  .supplier-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+  }
+  .supplier-card h3 { font-size: 14px; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+  .supplier-card h3 i { color: var(--blue); }
+  .supplier-meta { display: flex; flex-direction: column; gap: 5px; }
+  .supplier-meta-row { display: flex; justify-content: space-between; font-size: 12px; }
+  .supplier-meta-row .label { color: var(--muted); }
+  .supplier-meta-row .val { color: var(--text); font-weight: 600; }
+
+  /* TOAST */
+  #toast-container {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+  }
+  .toast {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 16px;
+    font-size: 13px;
+    color: var(--text);
+    box-shadow: 0 4px 24px rgba(0,0,0,.5);
+    pointer-events: auto;
+    animation: slideIn .2s ease;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 300px;
+  }
+  .toast.success { border-left: 3px solid var(--green); }
+  .toast.error { border-left: 3px solid var(--red); }
+  .toast.info { border-left: 3px solid var(--blue); }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+  @keyframes fadeOut { to { opacity: 0; transform: translateX(20px); } }
+
+  /* MISC */
+  .mono { font-family: monospace; }
+  .text-muted { color: var(--muted); }
+  .text-red { color: var(--red); }
+  .text-green { color: var(--green); }
+  .text-blue { color: var(--blue); }
+  .loader-dots::after {
+    content: '';
+    animation: dots 1.2s steps(4, end) infinite;
+  }
+  @keyframes dots {
+    0%, 20% { content: ''; }
+    40% { content: '.'; }
+    60% { content: '..'; }
+    80%, 100% { content: '...'; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-title">
+    <i class="fa fa-truck-fast"></i>
+    供应链 Dashboard
+  </div>
+  <div class="nav-links">
+    <a href="/"><i class="fa fa-store"></i> Kiosk</a>
+    <a href="/vending"><i class="fa fa-box"></i> 贩卖机</a>
+  </div>
+  <div class="nav-right">
+    <span class="status-dot connecting" id="statusDot"></span>
+    <span class="status-label" id="statusLabel">连接中</span>
+    <button id="refreshBtn" onclick="reconnectWS()">
+      <i class="fa fa-rotate-right" id="refreshIcon"></i>
+      重连
+    </button>
+  </div>
+</nav>
+
+<main>
+  <!-- KPI ROW -->
+  <div class="kpi-row">
+    <div class="kpi-card info">
+      <div class="kpi-icon"><i class="fa fa-layer-group"></i></div>
+      <div class="kpi-label">货道总数</div>
+      <div class="kpi-value" id="kpiLanes">—</div>
+    </div>
+    <div class="kpi-card" id="kpiLowCard">
+      <div class="kpi-icon"><i class="fa fa-triangle-exclamation"></i></div>
+      <div class="kpi-label">库存预警</div>
+      <div class="kpi-value" id="kpiLow">—</div>
+    </div>
+    <div class="kpi-card info">
+      <div class="kpi-icon"><i class="fa fa-file-invoice"></i></div>
+      <div class="kpi-label">采购单（活跃）</div>
+      <div class="kpi-value" id="kpiPOs">—</div>
+    </div>
+    <div class="kpi-card" id="kpiPreordersCard">
+      <div class="kpi-icon"><i class="fa fa-bell"></i></div>
+      <div class="kpi-label">待通知预订</div>
+      <div class="kpi-value" id="kpiPreorders">—</div>
+    </div>
+  </div>
+
+  <!-- INVENTORY -->
+  <section>
+    <div class="section-header">
+      <i class="fa fa-warehouse"></i>
+      <h2>库存状态</h2>
+      <span class="badge-count" id="invCount">0</span>
+    </div>
+    <div class="inventory-grid" id="inventoryGrid">
+      <div style="color:var(--muted); padding:20px; grid-column:1/-1; text-align:center;">
+        <span class="loader-dots">加载中</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- DAILY ORDER PREVIEW -->
+  <section>
+    <div class="section-header">
+      <i class="fa fa-calendar-check"></i>
+      <h2>今日补货预览</h2>
+    </div>
+    <div id="previewSection">
+      <div style="color:var(--muted); padding:20px; text-align:center;"><span class="loader-dots">加载中</span></div>
+    </div>
+  </section>
+
+  <!-- PURCHASE ORDERS -->
+  <section>
+    <div class="section-header">
+      <i class="fa fa-file-invoice-dollar"></i>
+      <h2>采购单</h2>
+      <span class="badge-count" id="poCount">0</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>PO ID</th>
+            <th>供应商</th>
+            <th>状态</th>
+            <th>商品数</th>
+            <th>金额</th>
+            <th>创建时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="poTableBody">
+          <tr class="empty-row"><td colspan="7"><span class="loader-dots">加载中</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- PREORDERS -->
+  <section>
+    <div class="section-header">
+      <i class="fa fa-bookmark"></i>
+      <h2>客户预订</h2>
+      <span class="badge-count" id="preorderCount">0</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>SKU 名称</th>
+            <th>数量</th>
+            <th>用户</th>
+            <th>状态</th>
+            <th>通知渠道</th>
+            <th>创建时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="preorderTableBody">
+          <tr class="empty-row"><td colspan="7"><span class="loader-dots">加载中</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- SUPPLIERS -->
+  <section>
+    <div class="section-header">
+      <i class="fa fa-building"></i>
+      <h2>供应商信息</h2>
+    </div>
+    <div class="supplier-grid" id="supplierGrid">
+      <div style="color:var(--muted); padding:20px; text-align:center;"><span class="loader-dots">加载中</span></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast-container"></div>
+
+<script>
+const BASE = 'https://vending-supply-chain.fxp007.workers.dev';
+let ws = null;
+let isRefreshing = false;
+let lastInventory = [];
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  const icon = type === 'success' ? 'fa-circle-check' : type === 'error' ? 'fa-circle-xmark' : 'fa-circle-info';
+  el.innerHTML = `<i class="fa ${icon}"></i> ${msg}`;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => {
+    el.style.animation = 'fadeOut .3s ease forwards';
+    setTimeout(() => el.remove(), 300);
+  }, 3000);
+}
+
+function relativeTime(ts) {
+  if (!ts) return '—';
+  const diff = Math.floor((Date.now() - new Date(ts)) / 1000);
+  if (diff < 60) return `${diff}s 前`;
+  if (diff < 3600) return `${Math.floor(diff/60)}m 前`;
+  if (diff < 86400) return `${Math.floor(diff/3600)}h 前`;
+  return `${Math.floor(diff/86400)}d 前`;
+}
+
+function fenToYuan(fen) {
+  return '¥' + (fen / 100).toFixed(2);
+}
+
+function shortId(id) {
+  if (!id) return '—';
+  const s = String(id);
+  return s.length > 8 ? '…' + s.slice(-6) : s;
+}
+
+function formatTime(ts) {
+  if (!ts) return '—';
+  try {
+    return new Date(ts).toLocaleString('zh-CN', { month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+  } catch { return ts; }
+}
+
+async function apiFetch(path, opts = {}) {
+  const res = await fetch(BASE + path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// ── Status helpers ─────────────────────────────────────────────────────────
+
+const PO_STATUS_LABEL = {
+  draft: '草稿', submitted: '已提交', acknowledged: '已确认',
+  shipped: '已发货', received: '已收货', stocked: '已入库',
+};
+const PO_STATUS_NEXT = {
+  draft: 'submitted', submitted: 'acknowledged', acknowledged: 'shipped',
+  shipped: 'received', received: 'stocked',
+};
+
+function statusBadge(status, type = 'po') {
+  const label = type === 'po' ? (PO_STATUS_LABEL[status] || status) : status;
+  return `<span class="status-badge status-${status}">${label}</span>`;
+}
+
+// ── Render: Inventory ──────────────────────────────────────────────────────
+
+function renderInventory(lanes) {
+  lastInventory = lanes;
+  const grid = document.getElementById('inventoryGrid');
+  document.getElementById('invCount').textContent = lanes.length;
+  if (!lanes.length) {
+    grid.innerHTML = '<div style="color:var(--muted);padding:20px;text-align:center;grid-column:1/-1">暂无货道数据</div>';
+    return;
+  }
+  grid.innerHTML = lanes.map(lane => {
+    const ratio = lane.capacity > 0 ? lane.qty / lane.capacity : 0;
+    const barColor = lane.low_stock ? 'red' : ratio < 0.5 ? 'yellow' : 'green';
+    const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+    return `
+    <div class="lane-card ${lane.low_stock ? 'low-stock' : ''}">
+      <div class="lane-header">
+        <span class="lane-loc">${lane.location || '—'}</span>
+        <span class="lane-name" title="${lane.name}">${lane.name}</span>
+      </div>
+      <div class="lane-sku">SKU: ${lane.sku_id || '—'}</div>
+      <div class="stock-bar-wrap">
+        <div class="stock-bar-bg">
+          <div class="stock-bar-fill ${barColor}" style="width:${pct}%"></div>
+        </div>
+        <div class="stock-bar-info">
+          <span class="stock-qty">${lane.qty} / ${lane.capacity}</span>
+          <span class="stock-restocked">${relativeTime(lane.last_restocked_at)}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Render: Daily Order Preview ────────────────────────────────────────────
+
+function renderPreview(data) {
+  const sec = document.getElementById('previewSection');
+  const suggestions = data.suggestions || [];
+  if (!suggestions.length) {
+    sec.innerHTML = '<div class="preview-empty"><i class="fa fa-circle-check text-green"></i> 暂无补货需求</div>';
+    return;
+  }
+
+  const allMeet = suggestions.every(s => s.meets_minimum);
+
+  let html = suggestions.map((s, idx) => {
+    const meetHtml = s.meets_minimum
+      ? `<span class="meets-min ok"><i class="fa fa-check"></i> 满足起订</span>`
+      : `<span class="meets-min fail"><i class="fa fa-xmark"></i> 未满起订</span>`;
+    const items = (s.items || []).map(item => `
+      <div class="preview-item-row">
+        <span class="preview-item-name">${item.sku_name || item.sku_id}</span>
+        <span class="preview-item-qty">
+          ${item.current_qty}<span class="arrow">→</span>${item.reorder_qty}
+        </span>
+      </div>`).join('');
+    return `
+    <div class="supplier-preview-card">
+      <div class="supplier-preview-header" onclick="togglePreview(${idx})">
+        <span class="supplier-badge">${s.supplier_name}</span>
+        ${meetHtml}
+        <span class="preview-cost">${fenToYuan(s.total_cost_fen)}</span>
+        <i class="fa fa-chevron-down preview-toggle" id="toggle-${idx}"></i>
+      </div>
+      <div class="supplier-preview-items" id="preview-items-${idx}">
+        ${items || '<div style="color:var(--muted);padding:8px 0;font-size:12px">无商品</div>'}
+      </div>
+    </div>`;
+  }).join('');
+
+  const totalCost = suggestions.reduce((a, s) => a + (s.total_cost_fen || 0), 0);
+  html += `
+  <div class="preview-actions">
+    <button class="btn btn-primary" id="orderBtn" onclick="placeOrder()" ${!allMeet ? 'disabled' : ''}>
+      <i class="fa fa-cart-shopping"></i> 立即下单
+    </button>
+    ${!allMeet ? '<span class="text-muted" style="font-size:12px"><i class="fa fa-info-circle"></i> 部分供应商未满起订金额，无法下单</span>' : ''}
+    <span style="margin-left:auto;color:var(--muted);font-size:13px">合计：<strong style="color:var(--text)">${fenToYuan(totalCost)}</strong></span>
+  </div>`;
+  sec.innerHTML = html;
+}
+
+function togglePreview(idx) {
+  const items = document.getElementById(`preview-items-${idx}`);
+  const toggle = document.getElementById(`toggle-${idx}`);
+  if (!items) return;
+  items.classList.toggle('open');
+  toggle.classList.toggle('open');
+}
+
+async function placeOrder() {
+  const btn = document.getElementById('orderBtn');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i> 下单中…';
+  try {
+    await apiFetch('/internal/daily-order', { method: 'POST', body: JSON.stringify({ dry_run: false }) });
+    toast('下单成功！', 'success');
+    await refresh();
+  } catch (e) {
+    toast('下单失败：' + e.message, 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa fa-cart-shopping"></i> 立即下单'; }
+  }
+}
+
+// ── Render: PO Table ───────────────────────────────────────────────────────
+
+function renderPOs(pos) {
+  const tbody = document.getElementById('poTableBody');
+  document.getElementById('poCount').textContent = pos.length;
+  const active = pos.filter(p => p.status !== 'stocked').length;
+  document.getElementById('kpiPOs').textContent = active;
+
+  if (!pos.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">暂无采购单</td></tr>';
+    return;
+  }
+
+  const totalFen = pos.reduce((a, p) => {
+    const s = (p.items || []).reduce((b, i) => b + (i.total_cost_fen || 0), 0);
+    return a + s;
+  }, 0);
+
+  tbody.innerHTML = pos.map(po => {
+    const itemCount = (po.items || []).length;
+    const fen = (po.items || []).reduce((a, i) => a + (i.total_cost_fen || 0), 0);
+    const canAdvance = po.status !== 'stocked';
+    const op = canAdvance
+      ? `<button class="btn btn-outline btn-sm" onclick="advancePO('${po.id}', this)">推进状态 →</button>`
+      : `<span style="color:var(--muted);font-size:11px">已完成</span>`;
+    return `<tr>
+      <td class="mono" title="${po.id}">${shortId(po.id)}</td>
+      <td>${po.supplier_name || po.supplier_id || '—'}</td>
+      <td>${statusBadge(po.status)}</td>
+      <td>${itemCount}</td>
+      <td>${fen ? fenToYuan(fen) : '—'}</td>
+      <td>${formatTime(po.created_at)}</td>
+      <td>${op}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function advancePO(id, btn) {
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i>';
+  try {
+    await apiFetch(`/purchase-orders/${id}/advance`, { method: 'POST', body: '{}' });
+    toast('采购单状态已推进', 'success');
+    await refresh();
+  } catch (e) {
+    toast('推进失败：' + e.message, 'error');
+    btn.disabled = false;
+    btn.innerHTML = '推进状态 →';
+  }
+}
+
+// ── Render: Preorders ──────────────────────────────────────────────────────
+
+function renderPreorders(preorders) {
+  const tbody = document.getElementById('preorderTableBody');
+  document.getElementById('preorderCount').textContent = preorders.length;
+  const pending = preorders.filter(p => p.status === 'pending').length;
+  document.getElementById('kpiPreorders').textContent = pending;
+  const kpiCard = document.getElementById('kpiPreordersCard');
+  kpiCard.className = 'kpi-card ' + (pending > 0 ? 'warn' : 'ok');
+
+  if (!preorders.length) {
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">暂无预订记录</td></tr>';
+    return;
+  }
+  tbody.innerHTML = preorders.map(pre => {
+    const canNotify = pre.status === 'stock_arrived';
+    const op = canNotify
+      ? `<button class="btn btn-green btn-sm" onclick="notifyPreorder('${pre.id}', this)"><i class="fa fa-bell"></i> 通知客户</button>`
+      : `<span style="color:var(--muted);font-size:11px">—</span>`;
+    return `<tr>
+      <td>${pre.sku_name || pre.sku_id}</td>
+      <td>${pre.qty}</td>
+      <td class="mono" title="${pre.user_id}">${shortId(pre.user_id)}</td>
+      <td>${statusBadge(pre.status, 'pre')}</td>
+      <td>${pre.notify_channel || '—'}</td>
+      <td>${formatTime(pre.created_at)}</td>
+      <td>${op}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function notifyPreorder(id, btn) {
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa fa-spinner fa-spin"></i>';
+  try {
+    await apiFetch(`/preorders/${id}/notify`, { method: 'POST', body: '{}' });
+    toast('客户通知已发送', 'success');
+    await refresh();
+  } catch (e) {
+    toast('通知失败：' + e.message, 'error');
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fa fa-bell"></i> 通知客户';
+  }
+}
+
+// ── Render: Suppliers ──────────────────────────────────────────────────────
+
+function renderSuppliers(suppliers, inventory) {
+  const grid = document.getElementById('supplierGrid');
+  if (!suppliers.length) {
+    grid.innerHTML = '<div style="color:var(--muted);padding:20px;text-align:center">暂无供应商数据</div>';
+    return;
+  }
+  // Count SKUs per supplier using inventory (no direct link in inventory data, so show total SKUs as fallback)
+  grid.innerHTML = suppliers.map(sup => {
+    return `
+    <div class="supplier-card">
+      <h3><i class="fa fa-building"></i>${sup.name}</h3>
+      <div class="supplier-meta">
+        <div class="supplier-meta-row">
+          <span class="label">起订金额</span>
+          <span class="val">${fenToYuan(sup.min_order_yuan * 100)}</span>
+        </div>
+        <div class="supplier-meta-row">
+          <span class="label">交货周期</span>
+          <span class="val">${sup.lead_time_days} 天</span>
+        </div>
+        <div class="supplier-meta-row">
+          <span class="label">供应商 ID</span>
+          <span class="val mono" style="font-size:11px">${shortId(sup.id)}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── KPI updates ────────────────────────────────────────────────────────────
+
+function updateKPILow(lanes) {
+  const lowCount = lanes.filter(l => l.low_stock).length;
+  document.getElementById('kpiLow').textContent = lowCount;
+  const card = document.getElementById('kpiLowCard');
+  card.className = 'kpi-card ' + (lowCount > 0 ? 'danger' : 'ok');
+}
+
+// ── SSE connection ─────────────────────────────────────────────────────────
+
+function setStatus(state) {
+  const dot   = document.getElementById('statusDot');
+  const label = document.getElementById('statusLabel');
+  if (dot)   dot.className   = 'status-dot ' + state;
+  if (label) label.textContent = state === 'connected' ? '实时' : state === 'connecting' ? '连接中' : '已断开';
+}
+
+function applyData(d) {
+  if (!d) return;
+  const inv = d.inventory || [];
+  if (inv.length || d.pos !== undefined) {
+    document.getElementById('kpiLanes').textContent = inv.length;
+    updateKPILow(inv);
+    renderInventory(inv);
+  }
+  if (d.pos)       renderPOs(d.pos);
+  if (d.preorders) renderPreorders(d.preorders);
+  if (d.suppliers) renderSuppliers(d.suppliers, d.inventory || []);
+  if (d.preview)   renderPreview(d.preview);
+}
+
+function connectWS() {
+  if (ws) { ws.close(); ws = null; }
+  setStatus('connecting');
+  ws = new WebSocket(BASE.replace('https://', 'wss://') + '/ws');
+  ws.onopen  = () => setStatus('connected');
+  ws.onmessage = e => {
+    const d = JSON.parse(e.data);
+    applyData(d);
+    if (d.type === 'snapshot') setStatus('connected');
+  };
+  ws.onclose = () => {
+    ws = null;
+    setStatus('disconnected');
+    setTimeout(connectWS, 4000);
+  };
+  ws.onerror = () => {};
+}
+
+// One-shot fetch used after mutating actions (create PO, advance, notify)
+async function refresh() {
+  if (isRefreshing) return;
+  isRefreshing = true;
+  const icon = document.getElementById('refreshIcon');
+  if (icon) icon.classList.add('fa-spin');
+  try {
+    const [inventory, pos, preorders, suppliers, preview] = await Promise.all([
+      apiFetch('/inventory').catch(() => []),
+      apiFetch('/purchase-orders').catch(() => []),
+      apiFetch('/preorders').catch(() => []),
+      apiFetch('/suppliers').catch(() => []),
+      apiFetch('/internal/daily-order/preview').catch(() => ({ suggestions: [] })),
+    ]);
+    applyData({ inventory, pos, preorders, suppliers, preview });
+  } catch { toast('加载失败', 'error'); }
+  finally {
+    isRefreshing = false;
+    if (icon) icon.classList.remove('fa-spin');
+  }
+}
+
+function reconnectWS() { connectWS(); }
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────
+
+connectWS();
+</script>
+</body>
+</html>

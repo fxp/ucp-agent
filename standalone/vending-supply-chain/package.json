@@ -1,0 +1,16 @@
+{
+  "name": "vending-supply-chain",
+  "version": "1.0.0",
+  "description": "Supply chain management API for vending machine networks — Cloudflare Worker + KV",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev":    "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types":  "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241022.0",
+    "typescript": "^5.5.2",
+    "wrangler": "^3.78.12"
+  }
+}
