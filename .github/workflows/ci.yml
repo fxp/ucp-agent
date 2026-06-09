@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ── Type-check both workers (runs on every push & PR) ──────────────────────
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        worker:
+          - cloudflare/agent-worker
+          - cloudflare/supply-chain-worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ${{ matrix.worker }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: ${{ matrix.worker }}
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+        working-directory: ${{ matrix.worker }}
+
+  # ── Deploy to Cloudflare (runs only on push to main, after typecheck) ──────
+  deploy:
+    name: Deploy → Cloudflare
+    needs: typecheck
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false   # never cancel an in-flight deploy
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            cloudflare/agent-worker/package-lock.json
+            cloudflare/supply-chain-worker/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm ci --prefix cloudflare/supply-chain-worker
+          npm ci --prefix cloudflare/agent-worker
+
+      # Deploy supply-chain-mock first — ucp-agent binds to it via Service Binding
+      - name: Deploy supply-chain-mock
+        run: npx wrangler deploy
+        working-directory: cloudflare/supply-chain-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Deploy ucp-agent
+        run: npx wrangler deploy
+        working-directory: cloudflare/agent-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      - name: Smoke test
+        run: |
+          HEALTH=$(curl -sf https://ucp-agent.fxp007.workers.dev/health)
+          echo "$HEALTH"
+          echo "$HEALTH" | grep -q '"ok":true' || (echo "health check failed" && exit 1)

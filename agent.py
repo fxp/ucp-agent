@@ -28,14 +28,15 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 PORT         = int(os.environ.get("AGENT_PORT", 8090))
 MERCHANT_URL = os.environ.get("MERCHANT_URL", "http://localhost:8080")
-GLM_API_KEY  = os.environ.get("GLM_API_KEY", "1790d449b46d437bbc8b101815048d64.lEMGH4tememSXbvH")
+GLM_API_KEY  = os.environ.get("GLM_API_KEY", "")
 GLM_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
 GLM_MODEL    = "glm-4-flash"
 AGENT_BASE   = f"http://localhost:{PORT}"
@@ -365,6 +366,24 @@ async def run_agent_phase1(user_message: str) -> AsyncGenerator[str, None]:
 
 # ── Phase 2: confirm payment → complete checkout → track order ──────────────────
 
+async def _verify_alipay_payment(token: str, alipay_order_id: str) -> dict:
+    """Server-side Alipay payment verification (安全隔离原则 — never trust frontend callback)."""
+    return await _get(f"{MERCHANT_URL}/alipay/query-order/{alipay_order_id}", token)
+
+
+def _build_ap2_mandate(mandate_type: str, mandate_body: dict) -> str:
+    """Construct AP2 checkout_mandate (mock SD-JWT per ACT/1.0)."""
+    import base64 as _b64, json as _j
+    header = _b64.urlsafe_b64encode(
+        b'{"alg":"ES256","typ":"ap2+sd-jwt","kid":"ucp-agent-v1"}'
+    ).rstrip(b"=").decode()
+    payload = _b64.urlsafe_b64encode(
+        _j.dumps(mandate_body, ensure_ascii=False, sort_keys=True).encode()
+    ).rstrip(b"=").decode()
+    # In production: sign with agent platform private key (ES256)
+    return f"{header}.{payload}.mock_platform_sig"
+
+
 async def run_agent_phase2(payment_id: str, gpay_token: str | None = None,
                             alipay_order_id: str | None = None,
                             intent_credential: str | None = None) -> AsyncGenerator[str, None]:
@@ -383,30 +402,77 @@ async def run_agent_phase2(payment_id: str, gpay_token: str | None = None,
     currency    = pending["currency"]
     product     = pending["product_name"]
 
-    # AP2: construct checkout_mandate (simulated SD-JWT)
-    # In production: platform signs checkout response + user authorization
-    import base64 as _b64m, json as _jm
+    # ── 安全隔离原则：服务端验证支付状态，不依赖前端反馈 ────────────────────────
+    # Per Alipay AI Pay spec: "预下单+结果查询"双阶段验证机制，
+    # 必须通过服务端查询确认最终交易状态，杜绝支付欺诈风险。
+    if alipay_order_id:
+        vid = f"alipay-verify-{uuid.uuid4()}"
+        yield sse("tool_call", {"id": vid, "name": "alipay_verify_payment",
+                                 "args": {"alipay_order_id": alipay_order_id,
+                                          "checkout_id": checkout_id}})
+        verify = await _verify_alipay_payment(token, alipay_order_id)
+        yield sse("tool_result", {"id": vid, "name": "alipay_verify_payment",
+                                   "status": verify["status"], "data": verify["data"]})
+
+        vdata = verify.get("data", {})
+
+        # Cross-check: alipay_order_id must belong to this checkout session
+        if vdata.get("checkout_id") and vdata["checkout_id"] != checkout_id:
+            yield sse("text", {"content": "⚠️ 支付订单与结账会话不匹配，拒绝继续。"})
+            yield sse("done", {})
+            return
+
+        if verify["status"] != 200 or vdata.get("status") != "paid":
+            reason = vdata.get("status", "unknown")
+            yield sse("text", {"content": f"⚠️ 服务端支付验证失败（状态：{reason}），无法完成结账。"})
+            yield sse("done", {})
+            return
+
+        # Use server-returned credential — override any frontend-provided value
+        # (安全隔离原则：服务端凭证比前端 postMessage 更可信)
+        server_credential = vdata.get("intent_credential")
+        if server_credential:
+            intent_credential = server_credential
+
+    # ── AP2 mandate 构造（ACT/1.0 意图授权凭证）─────────────────────────────────
     ap2_mandate = None
+    now_ts = time.time()
+
     if intent_credential:
-        # Alipay path: use intent_credential as the AP2 payment mandate
         mandate_body = {
-            "type": "alipay_intent_credential",
-            "credential": intent_credential,
-            "checkout_id": checkout_id,
-            "issued_by": f"{AGENT_BASE}/profile",
-            "act_version": "ACT/1.0",
+            "type":          "alipay_intent_credential",
+            "act_version":   "ACT/1.0",
+            "credential":    intent_credential,
+            "checkout_id":   checkout_id,
+            "alipay_order_id": alipay_order_id,
+            "amount":        {"value": amount, "currency": currency},
+            "agent_id":      AGENT_PROFILE["id"],
+            "issued_by":     f"{AGENT_BASE}/profile",
+            "iat":           int(now_ts),
+            "exp":           int(now_ts) + 300,
+            "verification":  {
+                "method":    "server_query",
+                "verified_at": int(now_ts),
+            },
         }
-        ap2_mandate = "ap2_sd_jwt." + _b64m.urlsafe_b64encode(
-            _jm.dumps(mandate_body, ensure_ascii=False).encode()
-        ).rstrip(b"=").decode() + ".mock_platform_sig"
-        yield sse("ap2_mandate", {"type": "alipay_intent_credential",
-                                   "mandate_preview": ap2_mandate[:60] + "…"})
+        ap2_mandate = _build_ap2_mandate("alipay_intent_credential", mandate_body)
+        yield sse("ap2_mandate", {
+            "type":     "alipay_intent_credential",
+            "act":      "ACT/1.0",
+            "verified": True,
+            "mandate_preview": ap2_mandate[:72] + "…",
+        })
+
     elif gpay_token:
-        mandate_body = {"type": "google_pay_token", "token_preview": gpay_token[:20],
-                        "checkout_id": checkout_id}
-        ap2_mandate = "ap2_sd_jwt." + _b64m.urlsafe_b64encode(
-            _jm.dumps(mandate_body, ensure_ascii=False).encode()
-        ).rstrip(b"=").decode() + ".mock_platform_sig"
+        mandate_body = {
+            "type":       "google_pay_token",
+            "token_preview": gpay_token[:20] + "…",
+            "checkout_id": checkout_id,
+            "agent_id":   AGENT_PROFILE["id"],
+            "issued_by":  f"{AGENT_BASE}/profile",
+            "iat":        int(now_ts),
+        }
+        ap2_mandate = _build_ap2_mandate("google_pay_token", mandate_body)
 
     yield sse("text", {"content": "✅ 支付已授权，正在完成结账…"})
 
@@ -463,8 +529,11 @@ async def run_agent_phase2(payment_id: str, gpay_token: str | None = None,
 
 # ── FastAPI ─────────────────────────────────────────────────────────────────────
 
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
 app = FastAPI(title="UCP Customer Agent")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 @app.get("/profile")
 def agent_profile():
@@ -486,14 +555,27 @@ async def chat(request: Request):
 
 @app.post("/api/alipay-create-order")
 async def alipay_create_order_proxy(request: Request):
-    """Proxy: agent creates Alipay pre-order on behalf of user."""
+    """Proxy: agent creates Alipay pre-order (alipay.trade.precreate) on behalf of user.
+
+    Follows Alipay AI Pay MCP tool pattern:
+    Input:  order_name, merchant_order_id (checkout_id), total_amount
+    Output: pre-order number + cashier_url for user confirmation
+    """
     body = await request.json()
+    # Use checkout_id as merchant_order_id for cross-reference verification
+    checkout_id = body.get("checkout_id", "")
     token = body.get("token", "")
     result = await _post(f"{MERCHANT_URL}/alipay/create-order", body={
-        "checkout_id":  body.get("checkout_id"),
-        "amount":       body.get("amount"),
-        "currency":     body.get("currency", "CNY"),
-        "product_name": body.get("product_name", ""),
+        "checkout_id":       checkout_id,
+        "merchant_order_id": checkout_id,   # Alipay field: merchant自定义订单号
+        "amount":            body.get("amount"),
+        "currency":          body.get("currency", "CNY"),
+        "product_name":      body.get("product_name", ""),
+        "agent_pay_info": {                  # Alipay AI Pay required field
+            "agent_type": "AI_AGENT",
+            "agent_id":   AGENT_PROFILE["id"],
+            "agent_name": AGENT_PROFILE["name"],
+        },
     }, token=token)
     return result
 
@@ -512,496 +594,10 @@ async def confirm_payment(request: Request):
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
 
-@app.get("/", response_class=HTMLResponse)
-def playground():
-    return _HTML
+@app.get("/", response_class=FileResponse)
+def index():
+    return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
 
-# ── Playground HTML ─────────────────────────────────────────────────────────────
-
-_HTML = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<title>UCP Customer Agent Playground</title>
-<script async src="https://pay.google.com/gp/p/js/pay.js" onload="_initGPay()"></script>
-<style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d1117;color:#e6edf3;height:100vh;display:flex;flex-direction:column}}
-header{{background:#161b22;border-bottom:1px solid #30363d;padding:12px 24px;display:flex;align-items:center;gap:10px;flex-shrink:0}}
-header h1{{font-size:15px;font-weight:700;color:#58a6ff}}
-.badge{{font-size:10px;padding:2px 8px;border-radius:10px;font-weight:700}}
-.bblue{{background:#1a3a5c;color:#58a6ff}}.bgreen{{background:#1a3a1a;color:#3fb950}}.byellow{{background:#3b2f00;color:#e3b341}}
-.profile-url{{font-size:11px;color:#6e7681;margin-left:auto;font-family:monospace}}
-
-.main{{display:grid;grid-template-columns:1fr 400px;flex:1;overflow:hidden}}
-
-/* Chat */
-.chat{{display:flex;flex-direction:column;border-right:1px solid #21262d}}
-.msgs{{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:14px}}
-.msg{{display:flex;gap:10px;animation:fi .2s ease}}
-@keyframes fi{{from{{opacity:0;transform:translateY(4px)}}to{{opacity:1}}}}
-.av{{width:28px;height:28px;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;margin-top:2px}}
-.msg.user .av{{background:#1a3a5c}}.msg.agent .av{{background:#1a3a1a}}
-.mb{{flex:1}}.role{{font-size:11px;font-weight:700;letter-spacing:.04em;color:#6e7681;margin-bottom:4px;text-transform:uppercase}}
-.txt{{font-size:13px;line-height:1.65;white-space:pre-wrap;word-break:break-word}}
-.msg.user .txt{{color:#cae8ff}}
-
-/* Payment card */
-.pay-card{{background:#1a2535;border:1px solid #1f6feb;border-radius:10px;padding:16px;margin-top:4px;max-width:360px}}
-.pay-card h3{{font-size:13px;font-weight:700;color:#58a6ff;margin-bottom:10px;display:flex;align-items:center;gap:6px}}
-.pay-item{{display:flex;justify-content:space-between;font-size:12px;color:#8b949e;margin-bottom:4px}}
-.pay-total{{display:flex;justify-content:space-between;font-size:16px;font-weight:800;color:#e6edf3;border-top:1px solid #30363d;padding-top:10px;margin-top:6px}}
-.pay-currency{{font-size:11px;color:#6e7681;margin-left:4px}}
-.pay-handler{{font-size:11px;color:#3fb950;margin-top:8px;display:flex;align-items:center;gap:4px}}
-.pay-btns{{display:flex;gap:8px;margin-top:14px}}
-.btn-pay{{flex:1;padding:10px;background:#1f6feb;color:white;border:none;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;transition:.15s}}
-.btn-pay:hover{{background:#388bfd}}
-.btn-cancel{{padding:10px 16px;background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:7px;font-size:13px;cursor:pointer}}
-.btn-cancel:hover{{background:#30363d}}
-.btn-gpay{{width:100%;padding:10px;background:#000;color:#fff;border:none;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;margin-bottom:6px}}
-.btn-gpay:hover{{background:#1a1a1a}}
-.btn-alipay{{width:100%;padding:11px;background:linear-gradient(135deg,#1677ff,#0958d9);color:#fff;border:none;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;margin-bottom:6px}}
-.btn-alipay:hover{{opacity:.9}}
-.alipay-cashier{{width:100%;border-radius:10px;overflow:hidden;border:1px solid #1f6feb;margin-top:10px;display:none}}
-.alipay-cashier.show{{display:block}}
-.alipay-cashier iframe{{width:100%;height:380px;border:none;display:block}}
-.ap2-badge{{display:inline-flex;align-items:center;gap:4px;font-size:10px;padding:2px 7px;border-radius:10px;background:#1a2535;color:#58a6ff;font-weight:600;border:1px solid #1f6feb;margin-top:6px}}
-
-/* Order done card */
-.order-card{{background:#1a3a1a;border:1px solid #238636;border-radius:10px;padding:14px;margin-top:4px;max-width:360px}}
-.order-card h3{{font-size:13px;font-weight:700;color:#3fb950;margin-bottom:8px}}
-.order-id{{font-family:monospace;font-size:11px;color:#8b949e;word-break:break-all;margin-bottom:8px}}
-.events{{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}}
-.ev-chip{{font-size:10px;padding:2px 8px;border-radius:10px;background:#1a4731;color:#3fb950;font-weight:600}}
-
-.suggestions{{padding:0 20px 14px;display:flex;gap:8px;flex-wrap:wrap}}
-.sug{{background:#161b22;border:1px solid #30363d;border-radius:20px;padding:5px 14px;font-size:12px;color:#8b949e;cursor:pointer;transition:.15s}}
-.sug:hover{{border-color:#58a6ff;color:#58a6ff}}
-
-.input-bar{{border-top:1px solid #21262d;padding:14px;display:flex;gap:10px;background:#161b22;flex-shrink:0}}
-.input-bar textarea{{flex:1;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:9px 12px;color:#e6edf3;font-size:13px;resize:none;font-family:inherit;min-height:56px}}
-.input-bar textarea:focus{{outline:none;border-color:#58a6ff}}
-.input-bar button{{padding:0 18px;background:#1f6feb;color:white;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;align-self:flex-end;height:36px}}
-.input-bar button:disabled{{opacity:.4;cursor:not-allowed}}
-
-/* Log panel */
-.log-panel{{display:flex;flex-direction:column;background:#0d1117}}
-.log-hdr{{padding:11px 14px;border-bottom:1px solid #21262d;font-size:11px;font-weight:700;letter-spacing:.08em;color:#6e7681;text-transform:uppercase;display:flex;align-items:center;gap:6px;flex-shrink:0}}
-.log-entries{{flex:1;overflow-y:auto;padding:10px}}
-.log-entry{{margin-bottom:7px;border:1px solid #21262d;border-radius:6px;overflow:hidden;animation:fi .2s ease}}
-.le-hdr{{padding:6px 10px;display:flex;align-items:center;gap:7px;cursor:pointer}}
-.le-hdr:hover{{background:#161b22}}
-.meth{{font-family:monospace;font-size:10px;font-weight:700;padding:1px 5px;border-radius:3px}}
-.mGET{{background:#1a3a5c;color:#58a6ff}}.mPOST{{background:#1a3a1a;color:#3fb950}}
-.lpath{{font-family:monospace;font-size:11px;color:#8b949e;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.lstat{{font-size:10px;font-weight:700;margin-left:auto}}.s2{{color:#3fb950}}.s4{{color:#f85149}}
-.larrow{{color:#6e7681;font-size:10px;transition:transform .15s}}
-.log-entry.open .larrow{{transform:rotate(90deg)}}
-.le-body{{display:none;padding:8px 10px;border-top:1px solid #21262d;background:#0a0e14}}
-.log-entry.open .le-body{{display:block}}
-.le-body pre{{font-family:monospace;font-size:10px;color:#8b949e;white-space:pre-wrap;word-break:break-all;max-height:180px;overflow-y:auto}}
-.calling{{background:#3b2f00;color:#e3b341;font-size:9px;padding:1px 6px;border-radius:3px;font-weight:700;font-family:monospace}}
-
-.status-bar{{padding:7px 12px;background:#161b22;border-top:1px solid #21262d;font-size:11px;color:#6e7681;display:flex;align-items:center;gap:5px;flex-shrink:0}}
-.dot{{width:6px;height:6px;border-radius:50%}}.idle{{background:#6e7681}}.thinking{{background:#e3b341;animation:p .8s infinite}}.done{{background:#3fb950}}
-@keyframes p{{0%,100%{{opacity:1}}50%{{opacity:.3}}}}
-::-webkit-scrollbar{{width:4px}}::-webkit-scrollbar-thumb{{background:#30363d;border-radius:2px}}
-</style>
-</head>
-<body>
-<header>
-  <span style="font-size:18px">🤖</span>
-  <h1>UCP Customer Agent</h1>
-  <span class="badge bblue">GLM-4</span>
-  <span class="badge bgreen">UCP 2026-04-08</span>
-  <span class="badge byellow">Vending Machine</span>
-  <span class="profile-url">profile: {AGENT_BASE}/profile</span>
-</header>
-<div class="main">
-  <div class="chat">
-    <div class="msgs" id="msgs">
-      <div class="msg agent">
-        <div class="av">🤖</div>
-        <div class="mb">
-          <div class="role">Agent</div>
-          <div class="txt">你好！我是 UCP 购物 Agent，由 GLM-4 驱动。
-
-我会通过 UCP 协议完整走完支付链路：
-🔍 发现商家 → 🔑 OAuth 认证 → 🛒 浏览商品 → 📋 创建结账 → 💳 支付确认 → 🤖 触发出货 → 📦 追踪履约
-
-告诉我你想要什么！</div>
-        </div>
-      </div>
-    </div>
-    <div class="suggestions" id="sugs">
-      <div class="sug" onclick="suggest(this)">帮我买一瓶可乐</div>
-      <div class="sug" onclick="suggest(this)">买矿泉水</div>
-      <div class="sug" onclick="suggest(this)">有什么饮料？</div>
-      <div class="sug" onclick="suggest(this)">帮我买绿茶</div>
-    </div>
-    <div class="input-bar">
-      <textarea id="inp" placeholder="告诉 Agent 你想买什么…" rows="2"
-        onkeydown="if(event.key==='Enter'&&!event.shiftKey){{event.preventDefault();send()}}"></textarea>
-      <button id="sbtn" onclick="send()">发送</button>
-    </div>
-  </div>
-
-  <div class="log-panel">
-    <div class="log-hdr">
-      <span>📡</span> Protocol Flow Log
-      <button onclick="clearLog()" style="margin-left:auto;background:none;border:1px solid #30363d;color:#6e7681;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px">Clear</button>
-    </div>
-    <div class="log-entries" id="log"><div style="color:#6e7681;font-size:12px;text-align:center;padding:40px 20px" id="lempty">Protocol calls will appear here</div></div>
-    <div class="status-bar" id="sbar">
-      <div class="dot idle" id="sdot"></div>
-      <span id="stxt">Idle</span>
-    </div>
-  </div>
-</div>
-
-<script>
-let busy = false;
-const MNAMES = {{
-  ucp_discover:'GET /.well-known/ucp', ucp_get_token:'POST /oauth/token',
-  ucp_browse_catalog:'POST /cart-sessions', ucp_create_checkout:'POST /checkout-sessions',
-  ucp_request_payment:'💳 Payment Request · AP2',
-  ucp_complete_checkout:'POST /checkout-sessions/{{id}}/complete',
-  ucp_track_order:'GET /orders/{{id}}',
-  ap2_mandate:'🔐 AP2 Mandate · ACT/1.0',
-}};
-const MTYPES = {{
-  ucp_discover:'GET', ucp_get_token:'POST', ucp_browse_catalog:'POST',
-  ucp_create_checkout:'POST', ucp_request_payment:'POST',
-  ucp_complete_checkout:'POST', ucp_track_order:'GET',
-  ap2_mandate:'AP2',
-}};
-
-function setStatus(s,t){{
-  document.getElementById('sdot').className='dot '+s;
-  document.getElementById('stxt').textContent=t;
-}}
-
-function addMsg(role, content=''){{
-  const el=document.getElementById('msgs');
-  const d=document.createElement('div');
-  d.className='msg '+role;
-  const av=role==='user'?'👤':'🤖';
-  const lbl=role==='user'?'You':'Agent';
-  d.innerHTML=`<div class="av">${{av}}</div><div class="mb"><div class="role">${{lbl}}</div><div class="txt" id="t-${{Date.now()}}">${{esc(content)}}</div></div>`;
-  el.appendChild(d);
-  el.scrollTop=99999;
-  return d.querySelector('.txt');
-}}
-
-function esc(s){{return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
-
-function addPayCard(pid, amount, currency, product, gpayConfig, alipayConfig){{
-  const el=document.getElementById('msgs');
-  const d=document.createElement('div');
-  d.className='msg agent';
-  const sym=currency==='CNY'?'¥':'$';
-  const amtStr=`${{sym}}${{(amount/100).toFixed(2)}}`;
-  const gpayBtn = gpayConfig ? `
-    <button class="btn-gpay" id="gpay-${{pid}}" onclick="gpayPay('${{pid}}', ${{amount}}, '${{currency}}', ${{JSON.stringify(gpayConfig).replace(/'/g,"\\'")}})">
-      <img src="https://pay.google.com/about/static/images/logos/googlepay_button_content.svg" alt="Google Pay" style="height:20px;vertical-align:middle;margin-right:6px">Pay
-    </button>` : '';
-  const alipayBtn = alipayConfig ? `
-    <button class="btn-alipay" onclick="alipayPay('${{pid}}', ${{amount}}, '${{currency}}', '${{esc(product)}}', ${{JSON.stringify(alipayConfig).replace(/'/g,"\\'")}})">
-      <span style="font-size:16px">支</span> 支付宝 AI付 · ACT/1.0
-    </button>` : '';
-  const hasAlt = !!(gpayConfig || alipayConfig);
-  d.innerHTML=`<div class="av">💳</div><div class="mb"><div class="role">Payment Request</div>
-    <div class="pay-card" id="paycard-${{pid}}">
-      <h3>💳 支付确认</h3>
-      <div class="pay-item"><span>商品</span><span>${{esc(product)}}</span></div>
-      <div class="pay-item"><span>商家</span><span>WM800 Vending Machine</span></div>
-      <div class="pay-item"><span>协议</span><span>UCP AP2 · 意图授权凭证</span></div>
-      <div class="pay-total"><span>合计</span><span>${{amtStr}}<span class="pay-currency">${{currency}}</span></span></div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
-        ${{alipayConfig ? '<span class="ap2-badge">🔐 ACT/1.0</span>' : ''}}
-        <span class="ap2-badge">🛡️ AP2 Mandate</span>
-        ${{gpayConfig ? '<span class="ap2-badge" style="color:#4285f4;border-color:#4285f4">G Pay</span>' : ''}}
-      </div>
-      <div class="pay-btns" id="pbtns-${{pid}}" style="margin-top:14px">
-        ${{alipayBtn}}
-        ${{gpayBtn}}
-        <button class="btn-pay" onclick="confirmPay('${{pid}}', this)">${{hasAlt ? '💸 Prepaid Token' : `确认支付 ${{amtStr}}`}}</button>
-        <button class="btn-cancel" onclick="cancelPay('${{pid}}', this)">取消</button>
-      </div>
-      <div class="alipay-cashier" id="alipay-cashier-${{pid}}">
-        <iframe id="alipay-frame-${{pid}}" src="about:blank"></iframe>
-      </div>
-    </div></div>`;
-  el.appendChild(d);
-  el.scrollTop=99999;
-  // Render official Google Pay button if available
-  if(gpayConfig && window._gpayClient) {{
-    try {{
-      const btn = window._gpayClient.createButton({{
-        onClick: () => gpayPay(pid, amount, currency, gpayConfig),
-        buttonType: 'pay',
-        buttonColor: 'black',
-      }});
-      btn.style.cssText='width:100%;border-radius:7px;overflow:hidden;margin-bottom:6px';
-      const btns = document.getElementById('pbtns-'+pid);
-      if(btns) btns.insertBefore(btn, btns.firstChild);
-      document.getElementById('gpay-'+pid)?.remove();
-    }} catch(e) {{ console.warn('gpay button render failed', e); }}
-  }}
-}}
-
-// Google Pay integration
-let _gpayReady = false;
-function _initGPay() {{
-  if(_gpayReady || !window.google?.payments?.api?.PaymentsClient) return;
-  window._gpayClient = new google.payments.api.PaymentsClient({{environment: 'TEST'}});
-  _gpayReady = true;
-}}
-
-async function gpayPay(pid, amount, currency, cfg) {{
-  _initGPay();
-  if(!window._gpayClient) {{
-    alert('Google Pay SDK not loaded. Check network connection.');
-    return;
-  }}
-  const totalPrice = (amount/100).toFixed(2);
-  const paymentDataRequest = {{
-    apiVersion: cfg.api_version || 2,
-    apiVersionMinor: cfg.api_version_minor || 0,
-    merchantInfo: {{
-      merchantId: cfg.merchant_info?.merchant_id || 'TEST',
-      merchantName: cfg.merchant_info?.merchant_name || 'WM800 Vending',
-    }},
-    allowedPaymentMethods: cfg.allowed_payment_methods || [{{
-      type: 'CARD',
-      parameters: {{allowedAuthMethods:['PAN_ONLY','CRYPTOGRAM_3DS'], allowedCardNetworks:['VISA','MASTERCARD']}},
-      tokenizationSpecification: {{type:'PAYMENT_GATEWAY', parameters:{{gateway:'example', gatewayMerchantId:'exampleGatewayMerchantId'}}}},
-    }}],
-    transactionInfo: {{
-      totalPriceStatus: 'FINAL',
-      totalPrice: totalPrice,
-      currencyCode: currency || 'CNY',
-      countryCode: 'CN',
-    }},
-  }};
-
-  const card = document.getElementById('paycard-'+pid);
-  try {{
-    const paymentData = await window._gpayClient.loadPaymentData(paymentDataRequest);
-    const gpayToken = paymentData?.paymentMethodData?.tokenizationData?.token || 'gpay-mock-token';
-    // Disable buttons
-    if(card) {{ card.style.opacity='.5'; card.style.pointerEvents='none'; }}
-    setStatus('thinking','Google Pay authorised, completing…');
-    // Phase 2 with gpay token
-    await _doConfirmPayment(pid, gpayToken);
-  }} catch(err) {{
-    if(err.statusCode === 'CANCELED') return;
-    console.error('Google Pay error', err);
-    addMsg('agent', `Google Pay 失败：${{err.message || err.statusCode}}`);
-  }}
-}}
-
-async function _doConfirmPayment(pid, gpayToken, alipayOrderId, intentCredential) {{
-  const agEl = addMsg('agent','');
-  let agTxt = '';
-  await streamSSE(
-    fetch('/api/confirm-payment',{{method:'POST',headers:{{'Content-Type':'application/json'}},
-      body:JSON.stringify({{
-        payment_id: pid,
-        gpay_token: gpayToken || null,
-        alipay_order_id: alipayOrderId || null,
-        intent_credential: intentCredential || null,
-      }})}}),
-    {{
-      text: p=>{{ agTxt+=p.content; agEl.textContent=agTxt; document.getElementById('msgs').scrollTop=99999; }},
-      tool_call: p=>{{ setStatus('thinking',`${{p.name}}…`); addLog(p.id,p.name,p.args); }},
-      tool_result: p=>{{ setStatus('thinking',`${{p.name}} → ${{p.status}}`); updLog(p.id,p.status,p.data); }},
-      payment_done: p=>{{ addOrderCard(p.order_id, p.amount, p.product, p.events); }},
-      ap2_mandate: p=>{{ addLog('ap2-'+Date.now(), 'ap2_mandate', p); updLog('ap2-'+Date.now(), 200, p); }},
-      done: _=>{{ setStatus('done','Done ✓'); setTimeout(()=>setStatus('idle','Idle'),3000); }},
-    }}
-  );
-}}
-
-// Alipay AI Pay integration
-let _pendingAlipayPid = null;
-async function alipayPay(pid, amount, currency, product, cfg) {{
-  _pendingAlipayPid = pid;
-  const card = document.getElementById('paycard-'+pid);
-  const cashierDiv = document.getElementById('alipay-cashier-'+pid);
-  const frame = document.getElementById('alipay-frame-'+pid);
-  // Disable other buttons
-  const btns = document.querySelectorAll('#pbtns-'+pid+' button');
-  btns.forEach(b => b.disabled = true);
-  setStatus('thinking', '创建支付宝预下单…');
-
-  // Create pre-order via agent API
-  const pending = Object.values(window._pendingPayments||{{}}).find(p=>p.pid===pid) || {{}};
-  const r = await fetch('/api/alipay-create-order', {{
-    method:'POST', headers:{{'Content-Type':'application/json'}},
-    body: JSON.stringify({{
-      checkout_id: pending.checkout_id || '',
-      amount, currency, product_name: product,
-    }})
-  }});
-  const order = await r.json();
-  if(!order.data?.cashier_url && !order.cashier_url) {{
-    addMsg('agent', '支付宝预下单失败，请重试');
-    btns.forEach(b=>b.disabled=false); return;
-  }}
-  const cashierUrl = order.data?.cashier_url || order.cashier_url;
-  const alipayOrderId = order.data?.alipay_order_id || order.alipay_order_id;
-
-  // Show cashier iframe
-  cashierDiv.classList.add('show');
-  frame.src = cashierUrl;
-  setStatus('thinking', '等待用户支付确认…');
-
-  // Listen for payment confirmation from iframe
-  window.addEventListener('message', async function handler(e) {{
-    if(e.data?.type !== 'alipay_paid' || e.data?.alipay_order_id !== alipayOrderId) return;
-    window.removeEventListener('message', handler);
-    cashierDiv.classList.remove('show');
-    if(card) {{ card.style.opacity='.5'; card.style.pointerEvents='none'; }}
-    setStatus('thinking', '支付宝已确认，正在完成结账…');
-    await _doConfirmPayment(pid, null, alipayOrderId, e.data.intent_credential);
-  }});
-}}
-
-function addOrderCard(order_id, amount, product, events){{
-  const el=document.getElementById('msgs');
-  const d=document.createElement('div');
-  d.className='msg agent';
-  const chips=events.map(e=>`<span class="ev-chip">${{esc(e)}}</span>`).join('');
-  d.innerHTML=`<div class="av">📦</div><div class="mb"><div class="role">Fulfillment</div>
-    <div class="order-card">
-      <h3>✅ 出货完成</h3>
-      <div class="pay-item"><span>商品</span><span>${{esc(product)}}</span></div>
-      <div class="pay-item"><span>支付金额</span><span>${{amount}}</span></div>
-      <div class="order-id">${{esc(order_id)}}</div>
-      <div class="events">${{chips}}</div>
-    </div></div>`;
-  el.appendChild(d);
-  el.scrollTop=99999;
-}}
-
-// Log
-function addLog(id, name, args){{
-  document.getElementById('lempty')?.remove();
-  const el=document.getElementById('log');
-  const meth=MTYPES[name]||'POST';
-  const path=MNAMES[name]||name;
-  const d=document.createElement('div');
-  d.className='log-entry'; d.id='le-'+id;
-  d.innerHTML=`<div class="le-hdr" onclick="this.parentElement.classList.toggle('open')">
-    <span class="meth m${{meth}}">${{meth}}</span>
-    <span class="lpath">${{esc(path)}}</span>
-    <span class="calling" id="lb-${{id}}">calling…</span>
-    <span class="larrow">▶</span>
-  </div>
-  <div class="le-body"><pre id="lbody-${{id}}">${{args&&Object.keys(args).length?pjson(args):'(no body)'}}</pre></div>`;
-  el.appendChild(d);
-  el.scrollTop=99999;
-}}
-function updLog(id, status, data){{
-  const b=document.getElementById('lb-'+id);
-  const p=document.getElementById('lbody-'+id);
-  if(b){{const ok=status>=200&&status<300; b.className='lstat '+(ok?'s2':'s4'); b.textContent=status;}}
-  if(p&&data) p.innerHTML=pjson(data);
-}}
-function pjson(o){{
-  try{{return JSON.stringify(o,null,2)
-    .replace(/"([^"]+)":/g,'<span style="color:#79c0ff">"$1"</span>:')
-    .replace(/: "([^"]*)"/g,': <span style="color:#a5d6ff">"$1"</span>')
-    .replace(/: (\\d+\\.?\\d*)/g,': <span style="color:#f2cc60">$1</span>');}}catch{{return String(o);}}
-}}
-function clearLog(){{document.getElementById('log').innerHTML='<div style="color:#6e7681;font-size:12px;text-align:center;padding:40px 20px" id="lempty">Protocol calls will appear here</div>';}}
-
-// Streaming helper
-async function streamSSE(fetchPromise, handlers){{
-  const resp = await fetchPromise;
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  while(true){{
-    const {{done, value}} = await reader.read();
-    if(done) break;
-    buf += dec.decode(value, {{stream:true}});
-    const parts = buf.split('\\n\\n');
-    buf = parts.pop() || '';
-    for(const part of parts){{
-      if(!part.trim()) continue;
-      let ev='message', data='';
-      for(const line of part.split('\\n')){{
-        if(line.startsWith('event: ')) ev=line.slice(7);
-        if(line.startsWith('data: ')) data=line.slice(6);
-      }}
-      if(!data) continue;
-      try{{
-        const p=JSON.parse(data);
-        handlers[ev]?.(p);
-      }}catch{{}}
-    }}
-  }}
-}}
-
-// Phase 1: chat
-async function send(){{
-  const inp=document.getElementById('inp');
-  const msg=inp.value.trim();
-  if(!msg||busy) return;
-  busy=true; inp.value='';
-  document.getElementById('sbtn').disabled=true;
-  document.getElementById('sugs').style.display='none';
-  addMsg('user', msg);
-  const agEl=addMsg('agent','');
-  let agTxt='';
-  setStatus('thinking','Agent is thinking…');
-
-  await streamSSE(
-    fetch('/api/chat',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{message:msg}})}}),
-    {{
-      text: p=>{{ agTxt+=p.content; agEl.textContent=agTxt; document.getElementById('msgs').scrollTop=99999; }},
-      tool_call: p=>{{ setStatus('thinking',`Calling ${{p.name}}…`); addLog(p.id,p.name,p.args); }},
-      tool_result: p=>{{ setStatus('thinking',`${{p.name}} → ${{p.status}}`); updLog(p.id,p.status,p.data); }},
-      payment_request: p=>{{
-        setStatus('thinking','Awaiting payment confirmation…');
-        // Store checkout context for alipay pre-order
-        window._pendingPayments = window._pendingPayments || {{}};
-        window._pendingPayments[p.payment_id] = {{
-          pid: p.payment_id, checkout_id: p.checkout_id || '',
-          token: p.token || '', amount: p.amount, currency: p.currency,
-        }};
-        addPayCard(p.payment_id, p.amount, p.currency, p.product_name, p.google_pay, p.alipay);
-      }},
-      done: _=>{{ setStatus('done','Done ✓'); setTimeout(()=>setStatus('idle','Idle'),3000); }},
-    }}
-  );
-  busy=false;
-  document.getElementById('sbtn').disabled=false;
-}}
-
-// Phase 2: confirm payment (Prepaid path)
-async function confirmPay(pid, btn){{
-  btn.disabled=true; btn.textContent='处理中…';
-  const card=document.getElementById('paycard-'+pid);
-  if(card){{ card.style.opacity='.5'; card.style.pointerEvents='none'; }}
-  setStatus('thinking','Processing payment…');
-  await _doConfirmPayment(pid, null);
-}}
-
-function cancelPay(pid, btn){{
-  const card=document.getElementById('paycard-'+pid);
-  if(card) card.parentElement.parentElement.remove();
-  addMsg('agent','已取消支付。如需重新购买，请再次告诉我。');
-  setStatus('idle','Idle');
-}}
-
-function suggest(el){{ document.getElementById('inp').value=el.textContent; send(); }}
-</script>
-</body>
-</html>
-"""
 
 if __name__ == "__main__":
     print(f"\n  UCP Customer Agent")

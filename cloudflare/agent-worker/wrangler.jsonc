@@ -1,0 +1,23 @@
+{
+  "name": "ucp-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-09-23",
+  "account_id": "0356d59ccdcff356bf3bbdb580bbaa60",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "services": [
+    { "binding": "MOCK", "service": "ucp-mock" },
+    { "binding": "SUPPLY_CHAIN", "service": "supply-chain-mock" }
+  ],
+  "kv_namespaces": [
+    { "binding": "WELFARE_KV", "id": "18172b20c18c4a03bb2fca189d3291d8" }
+  ],
+  "vars": {
+    "MERCHANT_URL": "https://ucp-mock.fxp007.workers.dev",
+    "SLACK_OPS_CHANNEL": "#vending-ops",
+    "SLACK_BOT_TOKEN": "",
+    "SLACK_WEBHOOK_URL": ""
+  }
+}

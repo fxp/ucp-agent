@@ -1,0 +1,1354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>UCP Vending · AI 购物助手</title>
+<script async src="https://pay.google.com/gp/p/js/pay.js" onload="_initGPay()"></script>
+<!-- face-api.js: open-source face detection + recognition (MIT) -->
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<!-- qrcodejs: client-side QR code generation (MIT) -->
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<style>
+/* ── Reset & base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:        #0d1117;
+  --bg2:       #161b22;
+  --bg3:       #21262d;
+  --border:    #30363d;
+  --text:      #e6edf3;
+  --muted:     #8b949e;
+  --blue:      #58a6ff;
+  --blue-bg:   #1a3a5c;
+  --green:     #3fb950;
+  --green-bg:  #1a3a1a;
+  --yellow:    #e3b341;
+  --red:       #f85149;
+  --radius:    12px;
+}
+html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+
+/* ── Layout ── */
+.app     { display: flex; flex-direction: column; height: 100vh; }
+header   { display: flex; align-items: center; gap: 10px; padding: 12px 20px; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.logo    { font-size: 20px; }
+.title   { font-size: 14px; font-weight: 700; color: var(--blue); }
+.badges  { display: flex; gap: 6px; margin-left: 4px; }
+.badge   { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 10px; }
+.bb      { background: var(--blue-bg);  color: var(--blue);  }
+.bg      { background: var(--green-bg); color: var(--green); }
+.by      { background: #3b2f00;         color: var(--yellow);}
+.status  { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.dot     { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.dot.thinking { background: var(--yellow); animation: pulse .8s infinite; }
+.dot.done     { background: var(--green); }
+
+.body    { display: flex; flex: 1; overflow: hidden; }
+
+/* ── Chat panel ── */
+.chat-panel  { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.chat-msgs   { flex: 1; overflow-y: auto; padding: 20px 16px; display: flex; flex-direction: column; gap: 16px; }
+.chat-suggestions { padding: 0 16px 12px; display: flex; gap: 8px; flex-wrap: wrap; flex-shrink: 0; }
+.sug         { background: var(--bg2); border: 1px solid var(--border); border-radius: 18px; padding: 5px 14px; font-size: 12px; color: var(--muted); cursor: pointer; transition: .15s; }
+.sug:hover   { border-color: var(--blue); color: var(--blue); }
+.chat-input  { border-top: 1px solid var(--border); padding: 12px 16px; display: flex; gap: 10px; background: var(--bg2); flex-shrink: 0; }
+.chat-input textarea { flex: 1; background: var(--bg3); border: 1px solid var(--border); border-radius: 8px; padding: 9px 12px; color: var(--text); font-size: 13px; resize: none; font-family: inherit; min-height: 52px; max-height: 120px; }
+.chat-input textarea:focus { outline: none; border-color: var(--blue); }
+.send-btn    { padding: 0 18px; background: var(--blue); color: #fff; border: none; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; align-self: flex-end; height: 36px; white-space: nowrap; }
+.send-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ── Bubble ── */
+.msg          { display: flex; gap: 10px; animation: fi .2s ease; max-width: 85%; }
+.msg.user     { align-self: flex-end; flex-direction: row-reverse; }
+.msg.agent    { align-self: flex-start; }
+@keyframes fi { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; } }
+.av           { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; margin-top: 2px; }
+.msg.user  .av { background: var(--blue-bg);  }
+.msg.agent .av { background: var(--green-bg); }
+.bubble       { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; }
+.msg.user  .bubble { background: var(--blue-bg); border-color: #1f6feb; }
+.msg.agent .bubble { }
+.bubble-text  { font-size: 13px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+.msg.user  .bubble-text { color: #cae8ff; }
+.role-label   { font-size: 10px; font-weight: 700; letter-spacing: .05em; color: var(--muted); margin-bottom: 5px; text-transform: uppercase; }
+
+/* ── Product grid card ── */
+.product-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 4px; }
+.prod-item    { background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 12px; cursor: pointer; transition: .15s; }
+.prod-item:hover { border-color: var(--blue); }
+.prod-item.unavail { opacity: .5; cursor: default; }
+.prod-emoji   { font-size: 28px; text-align: center; margin-bottom: 6px; }
+.prod-name    { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 4px; line-height: 1.3; }
+.prod-price   { font-size: 13px; font-weight: 800; color: var(--green); }
+.prod-stock   { font-size: 10px; color: var(--red); margin-top: 2px; }
+.prod-lane    { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+/* ── Payment card ── */
+.pay-card     { min-width: 280px; max-width: 340px; }
+.pay-header   { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+.pay-icon     { font-size: 20px; }
+.pay-title    { font-size: 14px; font-weight: 700; color: var(--blue); }
+.pay-row      { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.pay-total    { display: flex; justify-content: space-between; align-items: baseline; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 8px; }
+.pay-total-label { font-size: 13px; color: var(--muted); }
+.pay-total-amount { font-size: 22px; font-weight: 800; color: var(--text); }
+.pay-total-cur    { font-size: 11px; color: var(--muted); margin-left: 3px; }
+.ap2-chips    { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 10px; }
+.ap2-chip     { font-size: 10px; padding: 2px 7px; border-radius: 10px; border: 1px solid #1f6feb; color: var(--blue); background: var(--blue-bg); font-weight: 600; }
+.pay-methods  { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.btn-method   { width: 100%; padding: 11px; border: none; border-radius: 9px; font-size: 13px; font-weight: 700; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; transition: .15s; }
+.btn-alipay   { background: linear-gradient(135deg, #1677ff, #0958d9); color: #fff; }
+.btn-alipay:hover { opacity: .9; }
+.btn-gpay     { background: #000; color: #fff; }
+.btn-gpay:hover { background: #222; }
+.btn-prepaid  { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+.btn-prepaid:hover { border-color: var(--blue); color: var(--blue); }
+.btn-cancel   { background: none; color: var(--muted); border: none; font-size: 12px; cursor: pointer; padding: 4px; }
+.btn-cancel:hover { color: var(--red); }
+.alipay-cashier { border: 1px solid #1f6feb; border-radius: 10px; overflow: hidden; margin-top: 12px; display: none; }
+.alipay-cashier.show { display: block; }
+.alipay-cashier iframe { width: 100%; height: 380px; border: none; display: block; }
+
+/* ── Order timeline card ── */
+.order-card  { min-width: 260px; }
+.order-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.order-icon  { font-size: 20px; }
+.order-title { font-size: 14px; font-weight: 700; color: var(--green); }
+.order-meta  { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+.timeline    { display: flex; flex-direction: column; gap: 0; }
+.tl-item     { display: flex; align-items: flex-start; gap: 10px; }
+.tl-line     { display: flex; flex-direction: column; align-items: center; }
+.tl-dot      { width: 10px; height: 10px; border-radius: 50%; background: var(--green); flex-shrink: 0; margin-top: 3px; }
+.tl-connector { width: 2px; flex: 1; min-height: 16px; background: var(--border); margin: 2px 0; }
+.tl-item:last-child .tl-connector { display: none; }
+.tl-name     { font-size: 12px; color: var(--text); font-weight: 600; padding-bottom: 12px; }
+.tl-name.fail { color: var(--red); }
+.order-id    { font-family: monospace; font-size: 10px; color: var(--muted); margin-top: 8px; word-break: break-all; }
+
+/* ── Protocol log sidebar ── */
+.log-panel   { width: 360px; flex-shrink: 0; border-left: 1px solid var(--border); display: flex; flex-direction: column; background: var(--bg); }
+.log-header  { display: flex; align-items: center; gap: 6px; padding: 11px 14px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 700; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; flex-shrink: 0; }
+.log-entries { flex: 1; overflow-y: auto; padding: 8px; }
+.log-entry   { margin-bottom: 6px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; animation: fi .2s ease; }
+.le-head     { display: flex; align-items: center; gap: 6px; padding: 6px 10px; cursor: pointer; }
+.le-head:hover { background: var(--bg2); }
+.meth        { font-family: monospace; font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; }
+.mGET        { background: var(--blue-bg); color: var(--blue); }
+.mPOST       { background: var(--green-bg); color: var(--green); }
+.mAP2        { background: #3b2f00; color: var(--yellow); }
+.mEVENT      { background: #1a1a3a; color: #a78bfa; }
+.le-path     { font-family: monospace; font-size: 11px; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.le-status   { font-size: 10px; font-weight: 700; }
+.ok          { color: var(--green); }
+.err         { color: var(--red); }
+.calling     { font-size: 9px; padding: 1px 5px; border-radius: 3px; background: #3b2f00; color: var(--yellow); font-family: monospace; font-weight: 700; }
+.le-arrow    { color: var(--muted); font-size: 9px; transition: transform .15s; }
+.log-entry.open .le-arrow { transform: rotate(90deg); }
+.le-body     { display: none; padding: 8px 10px; border-top: 1px solid var(--border); background: #060a10; }
+.log-entry.open .le-body { display: block; }
+.le-body pre { font-family: monospace; font-size: 10px; color: var(--muted); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+
+.log-status  { padding: 7px 12px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+
+/* ── Misc ── */
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.typing { display: flex; gap: 4px; padding: 6px 2px; }
+.typing span { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: bounce 1.2s infinite; }
+.typing span:nth-child(2) { animation-delay: .2s; }
+.typing span:nth-child(3) { animation-delay: .4s; }
+@keyframes bounce { 0%,80%,100% { transform: translateY(0); } 40% { transform: translateY(-6px); } }
+
+@media (max-width: 720px) {
+  .log-panel { display: none; }
+}
+
+/* ── Kiosk Mode ── */
+.kiosk-panel {
+  width: 280px; flex-shrink: 0; border-right: 1px solid var(--border);
+  background: var(--bg2); display: none; flex-direction: column; overflow: hidden;
+}
+.kiosk-panel.active { display: flex; }
+.kiosk-header { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 700; letter-spacing: .08em; color: var(--muted); text-transform: uppercase; display: flex; align-items: center; gap: 6px; }
+.kiosk-section { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+.kiosk-section h4 { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+.camera-wrap { position: relative; width: 100%; aspect-ratio: 4/3; background: #000; border-radius: 8px; overflow: hidden; }
+.camera-wrap video { width: 100%; height: 100%; object-fit: cover; }
+.camera-wrap canvas { position: absolute; top: 0; left: 0; }
+.face-status { margin-top: 8px; font-size: 12px; color: var(--muted); min-height: 20px; }
+.face-status.detected { color: var(--green); }
+.face-status.recognized { color: var(--blue); font-weight: 700; }
+.face-status.error { color: var(--red); }
+.enroll-form { margin-top: 8px; display: flex; gap: 6px; }
+.enroll-form input { flex: 1; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; color: var(--text); font-size: 12px; }
+.enroll-form input:focus { outline: none; border-color: var(--blue); }
+.kbtn { background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; color: var(--text); font-size: 12px; cursor: pointer; transition: .15s; white-space: nowrap; }
+.kbtn:hover { border-color: var(--blue); color: var(--blue); }
+.kbtn.danger:hover { border-color: var(--red); color: var(--red); }
+.enrolled-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; max-height: 100px; overflow-y: auto; }
+.enrolled-item { display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: var(--text); padding: 3px 0; }
+.enrolled-item button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 11px; }
+.enrolled-item button:hover { color: var(--red); }
+.voice-status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.voice-status .mic-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.voice-status .mic-dot.listening { background: var(--red); animation: pulse .6s infinite; }
+.voice-transcript { margin-top: 6px; font-size: 11px; color: var(--muted); min-height: 16px; font-style: italic; }
+.kiosk-badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 10px; background: var(--bg3); color: var(--muted); border: 1px solid var(--border); cursor: pointer; transition: .15s; }
+.kiosk-badge.on { background: #1a3a1a; color: var(--green); border-color: var(--green); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <header>
+    <span class="logo">🤖</span>
+    <span class="title">UCP Vending · AI 购物助手</span>
+    <div class="badges">
+      <span class="badge bb">GLM-4</span>
+      <span class="badge bg">LangGraph</span>
+      <span class="badge by">AP2</span>
+    </div>
+    <button class="kiosk-badge" id="kiosk-toggle" onclick="toggleKiosk()" title="Kiosk Mode: 人脸识别 + 语音输入">
+      📷 Kiosk
+    </button>
+    <a href="/kiosk" style="padding:4px 10px;background:linear-gradient(135deg,rgba(59,130,246,.15),rgba(6,182,212,.15));border:1px solid rgba(59,130,246,.4);color:#93c5fd;border-radius:6px;font-size:11px;text-decoration:none;white-space:nowrap;font-weight:600" title="贩卖机对话模式">🏪 贩卖机</a>
+    <a href="/vending" style="padding:4px 10px;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;font-size:11px;text-decoration:none;white-space:nowrap" title="贩卖机运营看板">📊 VM</a>
+    <a href="/supplier" style="padding:4px 10px;background:none;border:1px solid var(--border);color:var(--muted);border-radius:6px;font-size:11px;text-decoration:none;white-space:nowrap" title="供应链管理看板">🏭 供应链</a>
+    <div class="status">
+      <div class="dot" id="status-dot"></div>
+      <span id="status-text">就绪</span>
+    </div>
+  </header>
+
+  <div class="body">
+
+    <!-- Kiosk panel (face recognition + voice) -->
+    <aside class="kiosk-panel" id="kiosk-panel">
+      <div class="kiosk-header">📷 Kiosk Mode</div>
+
+      <!-- Camera / Face Recognition -->
+      <div class="kiosk-section">
+        <h4>人脸识别</h4>
+        <div class="camera-wrap">
+          <video id="kiosk-video" autoplay muted playsinline></video>
+          <canvas id="kiosk-canvas"></canvas>
+        </div>
+        <div class="face-status" id="face-status">等待模型加载…</div>
+
+        <!-- Enrollment -->
+        <div class="enroll-form">
+          <input id="enroll-name" placeholder="姓名 / 工号" />
+          <button class="kbtn" onclick="enrollFace()">注册</button>
+        </div>
+        <div class="enrolled-list" id="enrolled-list"></div>
+      </div>
+
+      <!-- Voice Input -->
+      <div class="kiosk-section">
+        <h4>语音输入</h4>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="kbtn" id="voice-btn" onclick="toggleVoice()">🎤 开始聆听</button>
+          <button class="kbtn danger" onclick="stopVoice()">停止</button>
+        </div>
+        <div class="voice-status" style="margin-top:8px">
+          <div class="mic-dot" id="mic-dot"></div>
+          <span id="voice-state-text">未激活</span>
+        </div>
+        <div class="voice-transcript" id="voice-transcript"></div>
+      </div>
+
+      <!-- Biometric Status -->
+      <div class="kiosk-section">
+        <h4>生物授权状态</h4>
+        <div style="font-size:12px;color:var(--muted)" id="bio-status-text">无</div>
+        <button class="kbtn danger" style="margin-top:8px;font-size:11px" onclick="clearBiometric()">清除识别结果</button>
+      </div>
+    </aside>
+
+    <!-- Chat panel -->
+    <section class="chat-panel">
+      <div class="chat-msgs" id="chat">
+
+        <!-- Welcome message -->
+        <div class="msg agent">
+          <div class="av">🤖</div>
+          <div>
+            <div class="bubble">
+              <div class="role-label">AI 助手</div>
+              <div class="bubble-text">你好！我是 UCP 购物 Agent，由 GLM-4 + LangGraph 驱动。
+
+我会通过 UCP 协议帮你完成完整的购物流程：
+🔍 浏览商品 → 💳 选择支付方式 → 📦 自动出货
+
+告诉我你想买什么，或浏览下方商品目录。</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Quick suggestions -->
+      <div class="chat-suggestions" id="suggestions">
+        <div class="sug" onclick="suggest(this)">帮我买一瓶可乐</div>
+        <div class="sug" onclick="suggest(this)">来瓶矿泉水</div>
+        <div class="sug" onclick="suggest(this)">有什么好喝的饮料？</div>
+        <div class="sug" onclick="suggest(this)">帮我买绿茶</div>
+      </div>
+
+      <!-- Input bar -->
+      <div class="chat-input">
+        <textarea id="input" placeholder="告诉 Agent 你想要什么…" rows="2"
+          onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
+        <button class="send-btn" id="send-btn" onclick="send()">发送</button>
+        <button title="新对话" style="padding:0 10px;background:none;border:1px solid var(--border);color:var(--muted);border-radius:8px;cursor:pointer;height:36px;font-size:12px;white-space:nowrap" onclick="newConversation()">新对话</button>
+      </div>
+    </section>
+
+    <!-- Protocol log sidebar -->
+    <aside class="log-panel">
+      <div class="log-header">
+        <span>📡</span> Protocol Flow
+        <button onclick="clearLog()" style="margin-left:auto;background:none;border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:10px">清空</button>
+      </div>
+      <div class="log-entries" id="log">
+        <div id="log-empty" style="color:var(--muted);font-size:12px;text-align:center;padding:40px 16px">
+          协议调用记录将在这里显示
+        </div>
+      </div>
+      <div class="log-status">
+        <div class="dot" id="log-dot"></div>
+        <span id="log-status-text">等待中</span>
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ── Config ────────────────────────────────────────────────────────────────────
+// Override window.AGENT_BASE before this script to point at a remote server.
+const AGENT_BASE = (window.AGENT_BASE || '').replace(/\/$/, '');
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let busy = false;
+// Each conversation gets a fresh UUID so KV history is per-session, not shared.
+let currentThreadId = crypto.randomUUID();
+// Anonymous user ID — persists in sessionStorage so the same tab keeps one identity,
+// but clears when the tab closes (important for shared kiosk devices).
+// Face recognition overrides this with the enrolled user's name.
+let currentUserId = (() => {
+  let id = sessionStorage.getItem('ucp_uid');
+  if (!id) { id = 'anon-' + crypto.randomUUID().slice(0, 8); sessionStorage.setItem('ucp_uid', id); }
+  return id;
+})();
+const pendingPayments = {};     // pid → {thread_id, checkout_id, token, amount, currency}
+const _lastToolLogId = {};      // tool name → last log entry id (for result correlation)
+
+// ── Status ────────────────────────────────────────────────────────────────────
+function setStatus(state, text) {
+  const dot = document.getElementById('status-dot');
+  const txt = document.getElementById('status-text');
+  const ldot = document.getElementById('log-dot');
+  const ltxt = document.getElementById('log-status-text');
+  dot.className = 'dot ' + state;
+  ldot.className = 'dot ' + state;
+  txt.textContent = text;
+  ltxt.textContent = text;
+}
+
+// ── Chat helpers ──────────────────────────────────────────────────────────────
+function scrollChat() {
+  const c = document.getElementById('chat');
+  c.scrollTop = c.scrollHeight;
+}
+
+function addBubble(role, content, id) {
+  const chat = document.getElementById('chat');
+  const isUser = role === 'user';
+  const el = document.createElement('div');
+  el.className = 'msg ' + role;
+  if (id) el.id = id;
+  el.innerHTML = `
+    <div class="av">${isUser ? '👤' : '🤖'}</div>
+    <div>
+      <div class="bubble">
+        <div class="role-label">${isUser ? 'You' : 'AI 助手'}</div>
+        <div class="bubble-text" ${id ? `id="text-${id}"` : ''}>${esc(content)}</div>
+      </div>
+    </div>`;
+  chat.appendChild(el);
+  scrollChat();
+  return el;
+}
+
+function addTypingIndicator() {
+  const chat = document.getElementById('chat');
+  const el = document.createElement('div');
+  el.className = 'msg agent';
+  el.id = 'typing-indicator';
+  el.innerHTML = `
+    <div class="av">🤖</div>
+    <div>
+      <div class="bubble">
+        <div class="typing"><span></span><span></span><span></span></div>
+      </div>
+    </div>`;
+  chat.appendChild(el);
+  scrollChat();
+  return el;
+}
+
+function removeTypingIndicator() {
+  document.getElementById('typing-indicator')?.remove();
+}
+
+function esc(s) {
+  return String(s || '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Product catalog card ──────────────────────────────────────────────────────
+const PRODUCT_EMOJIS = {
+  'water': '💧', 'mineral': '💧', 'cola': '🥤', 'coke': '🥤', '可乐': '🥤',
+  'tea': '🍵', '茶': '🍵', 'chips': '🍟', '薯片': '🍟', 'coffee': '☕',
+  'juice': '🍊', 'beer': '🍺', 'milk': '🥛', 'energy': '⚡', '气泡': '🫧',
+};
+function productEmoji(name) {
+  const n = name.toLowerCase();
+  for (const [k, v] of Object.entries(PRODUCT_EMOJIS)) {
+    if (n.includes(k)) return v;
+  }
+  return '🛒';
+}
+
+function addProductGrid(items) {
+  const available = items.filter(i => i.quantity_available > 0);
+  const unavailable = items.filter(i => i.quantity_available === 0);
+  const allItems = [...available, ...unavailable];
+
+  const chat = document.getElementById('chat');
+  const el = document.createElement('div');
+  el.className = 'msg agent';
+  const grid = allItems.map(item => {
+    const avail = item.quantity_available > 0;
+    const price = item.price ? `¥${(item.price.amount / 100).toFixed(2)}` : '';
+    return `<div class="prod-item${avail ? '' : ' unavail'}" onclick="${avail ? `buyItem('${esc(item.id)}','${esc(item.name)}')` : ''}">
+      <div class="prod-emoji">${productEmoji(item.name)}</div>
+      <div class="prod-name">${esc(item.name)}</div>
+      <div class="prod-price">${price}</div>
+      ${!avail ? '<div class="prod-stock">缺货</div>' : ''}
+      <div class="prod-lane">${esc(item.id)}</div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="av">🤖</div>
+    <div>
+      <div class="bubble">
+        <div class="role-label">商品目录</div>
+        <div class="bubble-text" style="margin-bottom:10px">点击商品即可购买：</div>
+        <div class="product-grid">${grid}</div>
+      </div>
+    </div>`;
+  chat.appendChild(el);
+  scrollChat();
+}
+
+function buyItem(laneId, name) {
+  const inp = document.getElementById('input');
+  inp.value = `帮我买 ${name}`;
+  send();
+}
+
+// ── Payment card ──────────────────────────────────────────────────────────────
+function addPaymentCard(pid, amount, currency, productName, googlePayConfig, alipayConfig) {
+  const chat = document.getElementById('chat');
+  const el = document.createElement('div');
+  el.className = 'msg agent';
+  const sym = currency === 'CNY' ? '¥' : '$';
+  const amtStr = `${sym}${(amount / 100).toFixed(2)}`;
+
+  const ap2Chips = `
+    ${alipayConfig ? '<span class="ap2-chip">🔐 ACT/1.0</span>' : ''}
+    <span class="ap2-chip">🛡️ AP2 Mandate</span>
+    ${googlePayConfig ? '<span class="ap2-chip" style="color:#4285f4;border-color:#4285f4">G Pay</span>' : ''}`;
+
+  el.innerHTML = `
+    <div class="av">💳</div>
+    <div>
+      <div class="bubble pay-card" id="paycard-${pid}">
+        <div class="pay-header"><span class="pay-icon">💳</span><span class="pay-title">支付确认</span></div>
+        <div class="pay-row"><span>商品</span><span>${esc(productName)}</span></div>
+        <div class="pay-row"><span>商家</span><span>WM800 自动贩卖机</span></div>
+        <div class="pay-row"><span>协议</span><span>UCP AP2 2026-04-08</span></div>
+        <div class="pay-total">
+          <span class="pay-total-label">合计</span>
+          <span><span class="pay-total-amount">${amtStr}</span><span class="pay-total-cur">${currency}</span></span>
+        </div>
+        <div class="ap2-chips">${ap2Chips}</div>
+        <div class="pay-methods" id="paymethods-${pid}">
+          ${alipayConfig ? `<button class="btn-method btn-alipay" onclick="payAlipay('${pid}',${amount},'${currency}',${JSON.stringify(esc(productName))},${JSON.stringify(alipayConfig)})">支 支付宝 AI付 · ACT/1.0</button>` : ''}
+          ${googlePayConfig ? `<button class="btn-method btn-gpay" id="gpay-${pid}" onclick="payGPay('${pid}',${amount},'${currency}',${JSON.stringify(googlePayConfig)})">🟢 Google Pay</button>` : ''}
+          <button class="btn-method btn-prepaid" onclick="payPrepaid('${pid}',this)">💸 预付 Token（测试）${amtStr}</button>
+          <button class="btn-cancel" onclick="cancelPay('${pid}')">取消</button>
+        </div>
+        <div class="alipay-cashier" id="alipay-cashier-${pid}">
+          <iframe id="alipay-frame-${pid}" src="about:blank"></iframe>
+        </div>
+      </div>
+    </div>`;
+  chat.appendChild(el);
+  scrollChat();
+
+  if (googlePayConfig && window._gpayClient) {
+    renderGPayButton(pid, amount, currency, googlePayConfig);
+  }
+}
+
+function disablePayCard(pid) {
+  const card = document.getElementById(`paycard-${pid}`);
+  if (card) { card.style.opacity = '.5'; card.style.pointerEvents = 'none'; }
+}
+
+// ── Order timeline card ───────────────────────────────────────────────────────
+function addOrderCard(orderId, amount, product, events, pickupCode, pickupUrl) {
+  const chat = document.getElementById('chat');
+  const el = document.createElement('div');
+  el.className = 'msg agent';
+  const timeline = (events || []).map((ev, i) => `
+    <div class="tl-item">
+      <div class="tl-line">
+        <div class="tl-dot"></div>
+        ${i < events.length - 1 ? '<div class="tl-connector"></div>' : ''}
+      </div>
+      <div class="tl-name">${esc(ev)}</div>
+    </div>`).join('');
+
+  const qrId = 'qr-' + Math.random().toString(36).slice(2, 9);
+  const pickupSection = pickupCode ? `
+    <div style="margin-top:12px;padding:14px;background:var(--bg);border-radius:10px;border:1px solid var(--border);text-align:center">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:10px;font-weight:600">🏪 将手机出示给贩卖机扫码取货</div>
+      <div id="${qrId}" style="display:inline-block;padding:8px;background:#fff;border-radius:8px;margin-bottom:10px"></div>
+      <div style="font-family:monospace;font-size:22px;font-weight:800;letter-spacing:5px;color:var(--blue);padding:4px 0">${esc(pickupCode)}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:4px">或前往贩卖机屏幕手动输入上方取货码</div>
+      <a href="${esc(pickupUrl || '')}" target="_blank" style="display:block;margin-top:10px;padding:7px;background:var(--blue-bg);color:var(--blue);border-radius:6px;font-size:12px;font-weight:700;text-decoration:none">
+        打开贩卖机页面 →
+      </a>
+    </div>` : '';
+
+  el.innerHTML = `
+    <div class="av">📦</div>
+    <div>
+      <div class="bubble order-card">
+        <div class="order-header"><span class="order-icon">✅</span><span class="order-title">支付成功 · 待取货</span></div>
+        <div class="order-meta">
+          <span>${esc(product || '')}</span>
+          <span style="color:var(--green)">${esc(amount || '')}</span>
+        </div>
+        ${timeline ? `<div class="timeline" style="margin-top:8px">${timeline}</div>` : ''}
+        ${pickupSection}
+        <div class="order-id" style="margin-top:8px">订单 ${esc(orderId || '')}</div>
+      </div>
+    </div>`;
+  chat.appendChild(el);
+  // Generate QR code after element is in DOM
+  if (pickupCode && pickupUrl && window.QRCode) {
+    try {
+      new window.QRCode(document.getElementById(qrId), {
+        text: pickupUrl,
+        width: 160, height: 160,
+        colorDark: '#1e40af', colorLight: '#ffffff',
+        correctLevel: window.QRCode.CorrectLevel.M,
+      });
+    } catch (e) { console.warn('QR generation failed', e); }
+  }
+  scrollChat();
+}
+
+// ── Payment methods ───────────────────────────────────────────────────────────
+async function payPrepaid(pid, btn) {
+  btn.disabled = true;
+  btn.textContent = '处理中…';
+  disablePayCard(pid);
+  setStatus('thinking', '正在完成结账…');
+  await doPhase2(pid, null, null, null);
+}
+
+async function payGPay(pid, amount, currency, cfg) {
+  _initGPay();
+  if (!window._gpayClient) { alert('Google Pay SDK 未加载'); return; }
+  const req = {
+    apiVersion: cfg.api_version || 2,
+    apiVersionMinor: cfg.api_version_minor || 0,
+    merchantInfo: { merchantId: cfg.merchant_info?.merchant_id || 'TEST', merchantName: cfg.merchant_info?.merchant_name || 'WM800' },
+    allowedPaymentMethods: cfg.allowed_payment_methods || [{
+      type: 'CARD',
+      parameters: { allowedAuthMethods: ['PAN_ONLY','CRYPTOGRAM_3DS'], allowedCardNetworks: ['VISA','MASTERCARD'] },
+      tokenizationSpecification: { type:'PAYMENT_GATEWAY', parameters: { gateway:'example', gatewayMerchantId:'exampleGatewayMerchantId' } },
+    }],
+    transactionInfo: { totalPriceStatus:'FINAL', totalPrice: (amount/100).toFixed(2), currencyCode: currency || 'CNY', countryCode:'CN' },
+  };
+  try {
+    const data = await window._gpayClient.loadPaymentData(req);
+    const token = data?.paymentMethodData?.tokenizationData?.token || 'gpay-mock';
+    disablePayCard(pid);
+    setStatus('thinking', 'Google Pay 授权中…');
+    await doPhase2(pid, token, null, null);
+  } catch (e) {
+    if (e.statusCode !== 'CANCELED') {
+      const b = document.getElementById(`gpay-${pid}`);
+      if (b) { b.disabled = false; }
+      addBubble('agent', `Google Pay 失败：${e.message || e.statusCode}`);
+    }
+  }
+}
+
+async function payAlipay(pid, amount, currency, product, cfg) {
+  const pend = pendingPayments[pid] || {};
+  const methods = document.getElementById(`paymethods-${pid}`);
+  if (methods) Array.from(methods.querySelectorAll('button')).forEach(b => b.disabled = true);
+
+  setStatus('thinking', '创建支付宝预下单…');
+  const r = await fetch(AGENT_BASE + '/api/alipay-create-order', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ checkout_id: pend.checkout_id || '', amount, currency, product_name: product, token: pend.token }),
+  });
+  const order = await r.json();
+  const cashierUrl = order.data?.cashier_url || order.cashier_url;
+  if (!cashierUrl) {
+    addBubble('agent', '支付宝预下单失败，请重试');
+    if (methods) Array.from(methods.querySelectorAll('button')).forEach(b => b.disabled = false);
+    return;
+  }
+  const cashierDiv = document.getElementById(`alipay-cashier-${pid}`);
+  const frame = document.getElementById(`alipay-frame-${pid}`);
+  cashierDiv.classList.add('show');
+  frame.src = cashierUrl;
+  setStatus('thinking', '等待支付确认…');
+
+  window.addEventListener('message', async function handler(e) {
+    if (e.data?.type !== 'alipay_paid') return;
+    window.removeEventListener('message', handler);
+    cashierDiv.classList.remove('show');
+    disablePayCard(pid);
+    setStatus('thinking', '🔐 服务端验证支付中…');
+    addBubble('agent', '✅ 支付宝确认成功，正在服务端验证并生成授权凭证…');
+    await doPhase2(pid, null, e.data.alipay_order_id, e.data.intent_credential);
+  });
+}
+
+function cancelPay(pid) {
+  const card = document.getElementById(`paycard-${pid}`);
+  card?.closest('.msg')?.remove();
+  delete pendingPayments[pid];
+  addBubble('agent', '已取消支付。如需重新购买，请再次告诉我。');
+  setStatus('', '就绪');
+  busy = false;
+  document.getElementById('send-btn').disabled = false;
+}
+
+// ── Google Pay SDK ────────────────────────────────────────────────────────────
+let _gpayReady = false;
+function _initGPay() {
+  if (_gpayReady || !window.google?.payments?.api?.PaymentsClient) return;
+  window._gpayClient = new google.payments.api.PaymentsClient({ environment: 'TEST' });
+  _gpayReady = true;
+}
+function renderGPayButton(pid, amount, currency, cfg) {
+  try {
+    const btn = window._gpayClient.createButton({
+      onClick: () => payGPay(pid, amount, currency, cfg),
+      buttonType: 'pay', buttonColor: 'black',
+    });
+    btn.style.cssText = 'width:100%;border-radius:9px;overflow:hidden;margin-bottom:0';
+    const old = document.getElementById(`gpay-${pid}`);
+    old?.parentNode?.replaceChild(btn, old);
+  } catch (e) { console.warn('GPay button render failed', e); }
+}
+
+// ── Phase 2: confirm payment ──────────────────────────────────────────────────
+async function doPhase2(pid, gpayToken, alipayOrderId, intentCredential) {
+  const pend = pendingPayments[pid] || {};
+  // Support both LangGraph (thread_id) and Cloudflare Worker (payment_id) backends
+  const threadId = pend.thread_id || pid;
+
+  const agentMsgId = `agent-p2-${Date.now()}`;
+  addBubble('agent', '', agentMsgId);
+  let agText = '';
+
+  await streamSSE(
+    fetch(AGENT_BASE + '/api/confirm-payment', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        thread_id: threadId,
+        payment_id: pid,
+        gpay_token: gpayToken || null,
+        alipay_order_id: alipayOrderId || null,
+        intent_credential: intentCredential || null,
+      }),
+    }),
+    {
+      text: p => {
+        agText += p.content;
+        const el = document.getElementById(`text-${agentMsgId}`);
+        if (el) el.textContent = agText;
+        scrollChat();
+      },
+      tool_call: p => {
+        const id = p.id || (p.name + '-' + Date.now());
+        _lastToolLogId[p.name] = id;
+        setStatus('thinking', p.name + '…');
+        addLogEntry(id, p.name, p.args);
+      },
+      tool_result: p => {
+        const id = _lastToolLogId[p.name] || p.name;
+        setStatus('thinking', p.name + '…');
+        updateLogEntry(id, p.status || 200, p.data);
+      },
+      ap2_mandate: p => { addLogEntry('ap2-' + Date.now(), 'ap2_mandate', p); },
+      payment_done: p => {
+        delete pendingPayments[pid];
+        addOrderCard(p.order_id, p.amount, p.product, p.events || [], p.pickup_code, p.pickup_url);
+        // Kiosk: auto-reset after purchase so next user gets a clean session
+        if (kioskActive) setTimeout(() => newConversation(), 15000);
+      },
+      done: p => {
+        if (p?.thread_id) currentThreadId = p.thread_id;
+        setStatus('done', '完成 ✓');
+        setTimeout(() => setStatus('', '就绪'), 3000);
+        busy = false;
+        document.getElementById('send-btn').disabled = false;
+      },
+    }
+  );
+}
+
+// ── Phase 1: chat ─────────────────────────────────────────────────────────────
+async function send() {
+  const inp = document.getElementById('input');
+  const msg = inp.value.trim();
+  if (!msg || busy) return;
+  busy = true;
+  inp.value = '';
+  document.getElementById('send-btn').disabled = true;
+  document.getElementById('suggestions').style.display = 'none';
+
+  addBubble('user', msg);
+  addTypingIndicator();
+  setStatus('thinking', 'Agent 正在思考…');
+
+  const agentMsgId = `agent-${Date.now()}`;
+  let agText = '';
+  let catalogShown = false;
+  let agBubbleCreated = false;
+  let paymentRequested = false;
+
+  await streamSSE(
+    fetch(AGENT_BASE + '/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg, thread_id: currentThreadId, user_id: currentUserId }),
+    }),
+    {
+      text: p => {
+        if (!agBubbleCreated) {
+          removeTypingIndicator();
+          addBubble('agent', '', agentMsgId);
+          agBubbleCreated = true;
+        }
+        agText += p.content;
+        const el = document.getElementById(`text-${agentMsgId}`);
+        if (el) el.textContent = agText;
+        scrollChat();
+      },
+      tool_call: p => {
+        const id = p.id || (p.name + '-' + Date.now());
+        _lastToolLogId[p.name] = id;
+        setStatus('thinking', p.name + '…');
+        addLogEntry(id, p.name, p.args);
+      },
+      tool_result: p => {
+        const id = _lastToolLogId[p.name] || p.name;
+        setStatus('thinking', p.name + '…');
+        updateLogEntry(id, p.status || 200, p.data);
+        // Show catalog card
+        if (p.name === 'ucp_browse_catalog' && p.data?.line_items && !catalogShown) {
+          catalogShown = true;
+          removeTypingIndicator();
+          addProductGrid(p.data.line_items);
+        }
+      },
+      payment_request: p => {
+        paymentRequested = true;
+        removeTypingIndicator();
+        setStatus('thinking', '等待支付确认…');
+        // Use thread_id as the payment card id when available (LangGraph backend)
+        const pid = p.thread_id || p.payment_id || Date.now().toString();
+        if (p.thread_id) currentThreadId = p.thread_id;
+        pendingPayments[pid] = {
+          pid,
+          thread_id: p.thread_id,
+          checkout_id: p.checkout_id || '',
+          token: p.token || '',
+          amount: p.amount,
+          currency: p.currency,
+        };
+        addPaymentCard(pid, p.amount, p.currency, p.product_name, p.google_pay, p.alipay);
+      },
+      done: p => {
+        if (p?.thread_id) currentThreadId = p.thread_id;
+        removeTypingIndicator();
+        // Keep busy if payment is pending; phase2 will clear it
+        if (!paymentRequested) {
+          setStatus('done', '完成 ✓');
+          setTimeout(() => setStatus('', '就绪'), 3000);
+          busy = false;
+          document.getElementById('send-btn').disabled = false;
+        }
+      },
+    }
+  );
+}
+
+function suggest(el) {
+  document.getElementById('input').value = el.textContent;
+  send();
+}
+
+// ── SSE streaming helper ──────────────────────────────────────────────────────
+async function streamSSE(fetchPromise, handlers) {
+  const resp = await fetchPromise;
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const parts = buf.split('\n\n');
+    buf = parts.pop() || '';
+    for (const part of parts) {
+      if (!part.trim()) continue;
+      let ev = 'message', data = '';
+      for (const line of part.split('\n')) {
+        if (line.startsWith('event: ')) ev = line.slice(7).trim();
+        if (line.startsWith('data: '))  data = line.slice(6);
+      }
+      if (!data) continue;
+      try { handlers[ev]?.(JSON.parse(data)); } catch {}
+    }
+  }
+}
+
+// ── Protocol log ──────────────────────────────────────────────────────────────
+const LOG_NAMES = {
+  ucp_discover:           'GET /.well-known/ucp',
+  ucp_get_token:          'POST /oauth/token',
+  ucp_browse_catalog:     'POST /cart-sessions',
+  ucp_create_checkout:    'POST /checkout-sessions',
+  ucp_request_payment:    '💳 Payment Request',
+  ucp_complete_checkout:  'POST /checkout-sessions/{id}/complete',
+  ucp_track_order:        'GET /orders/{id}',
+  ap2_mandate:            '🔐 AP2 Mandate',
+  alipay_verify_payment:  'GET /alipay/query-order/{id}',
+  get_welfare_balance:    'GET welfare/balance',
+  deduct_welfare:         'POST welfare/deduct',
+  notify_ops:             'POST slack/ops',
+  notify_restock:         'POST slack/restock',
+  notify_payment_failed:  'POST slack/payment-failed',
+  query_supplier_sku:     'GET yonyou/sku',
+  create_preorder:        'POST yonyou/preorder',
+};
+const LOG_METHS = {
+  ucp_discover: 'GET', ucp_get_token: 'POST', ucp_browse_catalog: 'POST',
+  ucp_create_checkout: 'POST', ucp_request_payment: 'POST',
+  ucp_complete_checkout: 'POST', ucp_track_order: 'GET',
+  ap2_mandate: 'AP2', alipay_verify_payment: 'GET',
+  get_welfare_balance: 'GET', deduct_welfare: 'POST',
+  notify_ops: 'POST', notify_restock: 'POST', notify_payment_failed: 'POST',
+  query_supplier_sku: 'GET', create_preorder: 'POST',
+};
+
+function addLogEntry(id, name, args) {
+  document.getElementById('log-empty')?.remove();
+  const log = document.getElementById('log');
+  const meth = LOG_METHS[name] || 'POST';
+  const path = LOG_NAMES[name] || name;
+  const el = document.createElement('div');
+  el.className = 'log-entry';
+  el.id = `le-${id}`;
+  el.innerHTML = `
+    <div class="le-head" onclick="this.parentElement.classList.toggle('open')">
+      <span class="meth m${meth}">${meth}</span>
+      <span class="le-path">${esc(path)}</span>
+      <span class="calling" id="lb-${id}">calling…</span>
+      <span class="le-arrow">▶</span>
+    </div>
+    <div class="le-body">
+      <pre id="lbody-${id}">${args && Object.keys(args).length ? pjson(args) : '(no body)'}</pre>
+    </div>`;
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+function updateLogEntry(id, status, data) {
+  const badge = document.getElementById(`lb-${id}`);
+  const body  = document.getElementById(`lbody-${id}`);
+  if (badge) {
+    const ok = !status || (status >= 200 && status < 300);
+    badge.className = 'le-status ' + (ok ? 'ok' : 'err');
+    badge.textContent = status || '✓';
+  }
+  if (body && data) body.innerHTML = pjson(data);
+}
+
+// Start a fresh conversation: new thread_id isolates KV history from the previous user.
+// In kiosk mode this is called automatically after purchase completes.
+function newConversation() {
+  currentThreadId = crypto.randomUUID();
+  // Reset to anonymous user for kiosk (face re-auth required per session)
+  if (kioskActive) {
+    clearBiometric();
+    const newAnon = 'anon-' + crypto.randomUUID().slice(0, 8);
+    currentUserId = newAnon;
+    sessionStorage.setItem('ucp_uid', newAnon);
+  }
+  // Clear chat messages (keep log)
+  const msgs = document.getElementById('messages');
+  if (msgs) msgs.innerHTML = '';
+  addBubble('agent', '✨ 新对话已开始，我可以为您服务！');
+  document.getElementById('suggestions').style.display = '';
+  busy = false;
+  document.getElementById('send-btn').disabled = false;
+}
+
+function clearLog() {
+  document.getElementById('log').innerHTML = `
+    <div id="log-empty" style="color:var(--muted);font-size:12px;text-align:center;padding:40px 16px">
+      协议调用记录将在这里显示
+    </div>`;
+}
+
+function pjson(obj) {
+  try {
+    return JSON.stringify(obj, null, 2)
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/"([^"]+)":/g, '<span style="color:#79c0ff">"$1"</span>:')
+      .replace(/: "([^"]*)"/g, ': <span style="color:#a5d6ff">"$1"</span>')
+      .replace(/: (\d+\.?\d*)/g, ': <span style="color:#f2cc60">$1</span>');
+  } catch { return String(obj); }
+}
+
+// ── Kiosk Mode (Face Recognition + Voice) ────────────────────────────────────
+// Face recognition: face-api.js (MIT) — https://github.com/justadudewhohacks/face-api.js
+// Voice: Web Speech API (built-in Chrome/Edge)
+
+const FACE_MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js@0.22.2/weights';
+const FACE_MATCH_THRESHOLD = 0.55;  // lower = stricter (euclidean distance)
+const ATTENTION_THRESHOLD_MS = 3000; // time user must look at camera to trigger agent
+
+let kioskActive = false;
+let faceModelsLoaded = false;
+let faceModelsLoading = false;
+let videoStream = null;
+let recognitionLoop = null;
+let enrolledFaces = [];       // [{name, descriptor}] — persisted in localStorage
+let currentBiometric = null;  // null | {method, confidence, voice_verified, verified_at}
+let recognizedUser = null;    // null | {name, confidence}
+let attentionTimer = null;
+let voiceRecognition = null;
+let voiceActive = false;
+
+// ── Kiosk toggle ──────────────────────────────────────────────────────────────
+async function toggleKiosk() {
+  kioskActive = !kioskActive;
+  const panel = document.getElementById('kiosk-panel');
+  const btn   = document.getElementById('kiosk-toggle');
+  panel.classList.toggle('active', kioskActive);
+  btn.classList.toggle('on', kioskActive);
+  btn.textContent = kioskActive ? '📷 Kiosk ON' : '📷 Kiosk';
+
+  if (kioskActive) {
+    await startCamera();
+    await loadEnrolledFaces();
+    renderEnrolledList();
+    if (!faceModelsLoaded) loadFaceModels();
+  } else {
+    stopCamera();
+    stopVoice();
+  }
+}
+
+// ── Face models (lazy load) ───────────────────────────────────────────────────
+async function loadFaceModels() {
+  if (faceModelsLoaded || faceModelsLoading) return;
+  if (typeof faceapi === 'undefined') {
+    setFaceStatus('face-api.js 未加载', 'error'); return;
+  }
+  faceModelsLoading = true;
+  setFaceStatus('加载人脸识别模型…');
+  try {
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODEL_URL),
+      faceapi.nets.faceLandmark68TinyNet.loadFromUri(FACE_MODEL_URL),
+      faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODEL_URL),
+    ]);
+    faceModelsLoaded = true;
+    faceModelsLoading = false;
+    setFaceStatus('模型就绪，开始扫描…');
+    startRecognitionLoop();
+  } catch (e) {
+    faceModelsLoading = false;
+    setFaceStatus('模型加载失败：' + e.message, 'error');
+    console.error('face-api.js model load failed', e);
+  }
+}
+
+// ── Camera ────────────────────────────────────────────────────────────────────
+async function startCamera() {
+  try {
+    videoStream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+    const video = document.getElementById('kiosk-video');
+    video.srcObject = videoStream;
+    await video.play();
+    // Size canvas to match video
+    video.addEventListener('loadedmetadata', () => {
+      const c = document.getElementById('kiosk-canvas');
+      c.width = video.videoWidth; c.height = video.videoHeight;
+    }, { once: true });
+  } catch (e) {
+    setFaceStatus('摄像头访问失败：' + e.message, 'error');
+  }
+}
+
+function stopCamera() {
+  if (recognitionLoop) { clearInterval(recognitionLoop); recognitionLoop = null; }
+  if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
+  const video = document.getElementById('kiosk-video');
+  if (video) video.srcObject = null;
+}
+
+// ── Recognition loop ──────────────────────────────────────────────────────────
+function startRecognitionLoop() {
+  if (recognitionLoop) clearInterval(recognitionLoop);
+  recognitionLoop = setInterval(runDetection, 700);
+}
+
+async function runDetection() {
+  if (!faceModelsLoaded || !kioskActive) return;
+  const video = document.getElementById('kiosk-video');
+  if (!video || video.paused || video.ended || !video.videoWidth) return;
+
+  try {
+    const detections = await faceapi
+      .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.4 }))
+      .withFaceLandmarks(true)
+      .withFaceDescriptor();
+
+    const canvas = document.getElementById('kiosk-canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!detections) {
+      setFaceStatus('未检测到人脸…');
+      recognizedUser = null;
+      clearAttentionTimer();
+      return;
+    }
+
+    // Draw detection box
+    const { x, y, width, height } = detections.detection.box;
+    const scaleX = canvas.width / video.videoWidth;
+    const scaleY = canvas.height / video.videoHeight;
+    ctx.strokeStyle = enrolledFaces.length ? '#58a6ff' : '#e3b341';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x * scaleX, y * scaleY, width * scaleX, height * scaleY);
+
+    if (!enrolledFaces.length) {
+      setFaceStatus('检测到人脸，请先注册用户', 'detected');
+      return;
+    }
+
+    // Match against enrolled descriptors
+    const labeled = enrolledFaces.map(f => new faceapi.LabeledFaceDescriptors(f.name, [new Float32Array(f.descriptor)]));
+    const matcher = new faceapi.FaceMatcher(labeled, FACE_MATCH_THRESHOLD);
+    const match   = matcher.findBestMatch(detections.descriptor);
+
+    if (match.label !== 'unknown') {
+      const confidence = Math.max(0, 1 - match.distance);
+      ctx.strokeStyle = '#3fb950';
+      ctx.strokeRect(x * scaleX, y * scaleY, width * scaleX, height * scaleY);
+      ctx.fillStyle = '#3fb950';
+      ctx.font = '12px monospace';
+      ctx.fillText(match.label, x * scaleX, y * scaleY - 4);
+
+      if (!recognizedUser || recognizedUser.name !== match.label) {
+        recognizedUser = { name: match.label, confidence };
+        startAttentionTimer(match.label, confidence);
+      }
+      setFaceStatus(`✓ ${match.label}（置信度 ${(confidence * 100).toFixed(0)}%）`, 'recognized');
+    } else {
+      setFaceStatus('未知用户 — 请注册', 'detected');
+      recognizedUser = null;
+      clearAttentionTimer();
+    }
+  } catch (e) {
+    // Silently skip detection errors (common when video not ready)
+  }
+}
+
+// ── Attention timer: auto-greet after ATTENTION_THRESHOLD_MS ─────────────────
+function startAttentionTimer(name, confidence) {
+  clearAttentionTimer();
+  attentionTimer = setTimeout(() => {
+    setCurrentUser(name, confidence);
+    greetUser(name);
+  }, ATTENTION_THRESHOLD_MS);
+}
+
+function clearAttentionTimer() {
+  if (attentionTimer) { clearTimeout(attentionTimer); attentionTimer = null; }
+}
+
+function setCurrentUser(name, confidence) {
+  // If switching to a different user, start a fresh conversation thread
+  if (currentUserId !== name) {
+    currentThreadId = crypto.randomUUID();
+    const msgs = document.getElementById('messages');
+    if (msgs) msgs.innerHTML = '';
+  }
+  currentUserId = name;
+  sessionStorage.setItem('ucp_uid', name);
+  currentBiometric = {
+    method: 'face_recognition',
+    provider: 'face-api.js',
+    confidence,
+    voice_verified: false,
+    verified_at: Math.floor(Date.now() / 1000),
+  };
+  updateBioStatus();
+}
+
+function greetUser(name) {
+  if (busy) return;
+  addBubble('agent', `👋 欢迎，${name}！请说出您想要什么，或直接点击下方快捷选项。`);
+  // Auto-start voice if not already listening
+  if (!voiceActive) startVoice();
+}
+
+function updateBioStatus() {
+  const el = document.getElementById('bio-status-text');
+  if (!el) return;
+  if (currentBiometric) {
+    el.innerHTML = `<span style="color:var(--green)">✓ ${currentUserId}</span>` +
+      `<br>置信度 ${(currentBiometric.confidence * 100).toFixed(0)}%` +
+      (currentBiometric.voice_verified ? ' · 🎤 声纹✓' : '');
+  } else {
+    el.textContent = '无';
+  }
+}
+
+// ── Face enrollment ───────────────────────────────────────────────────────────
+async function enrollFace() {
+  if (!faceModelsLoaded) { alert('请等待模型加载完成'); return; }
+  const nameEl = document.getElementById('enroll-name');
+  const name = nameEl.value.trim();
+  if (!name) { nameEl.focus(); return; }
+
+  const video = document.getElementById('kiosk-video');
+  if (!video.videoWidth) { alert('摄像头未就绪'); return; }
+
+  setFaceStatus('正在采集人脸数据…');
+  const descriptors = [];
+
+  // Capture 5 frames for robustness
+  for (let i = 0; i < 5; i++) {
+    await new Promise(r => setTimeout(r, 300));
+    const det = await faceapi
+      .detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.5 }))
+      .withFaceLandmarks(true)
+      .withFaceDescriptor();
+    if (det) descriptors.push(Array.from(det.descriptor));
+  }
+
+  if (!descriptors.length) {
+    setFaceStatus('未检测到人脸，请正对摄像头', 'error'); return;
+  }
+
+  // Average descriptor for robustness
+  const avg = descriptors[0].map((_, i) => descriptors.reduce((s, d) => s + d[i], 0) / descriptors.length);
+  const entry = { name, descriptor: avg, enrolledAt: new Date().toISOString() };
+  enrolledFaces.push(entry);
+  await saveFaceToKV(name, avg);
+  renderEnrolledList();
+  nameEl.value = '';
+  setFaceStatus(`✓ ${name} 注册成功（${descriptors.length} 帧）`, 'recognized');
+}
+
+async function deleteEnrolled(name) {
+  enrolledFaces = enrolledFaces.filter(f => f.name !== name);
+  if (recognizedUser?.name === name) { recognizedUser = null; currentBiometric = null; currentUserId = 'guest'; updateBioStatus(); }
+  await deleteFaceFromKV(name);
+  renderEnrolledList();
+}
+
+function renderEnrolledList() {
+  const list = document.getElementById('enrolled-list');
+  if (!list) return;
+  list.innerHTML = enrolledFaces.length
+    ? enrolledFaces.map(f => `
+        <div class="enrolled-item">
+          <span>👤 ${esc(f.name)}</span>
+          <button onclick="deleteEnrolled('${esc(f.name)}')" title="删除">✕</button>
+        </div>`).join('')
+    : '<div style="color:var(--muted);font-size:11px">暂无已注册用户</div>';
+}
+
+async function saveFaceToKV(name, descriptor) {
+  try {
+    await fetch(`/api/faces/${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ descriptor, enrolled_at: new Date().toISOString() }),
+    });
+  } catch (e) { console.warn('face KV save failed', e); }
+}
+
+async function deleteFaceFromKV(name) {
+  try {
+    await fetch(`/api/faces/${encodeURIComponent(name)}`, { method: 'DELETE' });
+  } catch (e) { console.warn('face KV delete failed', e); }
+}
+
+async function loadEnrolledFaces() {
+  try {
+    const res = await fetch('/api/faces');
+    if (res.ok) {
+      const json = await res.json();
+      enrolledFaces = (json.faces || []).map(f => ({
+        name: f.user_id,
+        descriptor: f.descriptor,
+        enrolledAt: f.enrolled_at,
+      }));
+      return;
+    }
+  } catch (e) { console.warn('face KV load failed, using localStorage fallback', e); }
+  // localStorage fallback
+  try {
+    const raw = localStorage.getItem('ucp_enrolled_faces');
+    enrolledFaces = raw ? JSON.parse(raw) : [];
+  } catch { enrolledFaces = []; }
+}
+
+function setFaceStatus(msg, cls = '') {
+  const el = document.getElementById('face-status');
+  if (el) { el.textContent = msg; el.className = 'face-status ' + cls; }
+}
+
+function clearBiometric() {
+  currentBiometric = null;
+  recognizedUser = null;
+  currentUserId = 'guest';
+  updateBioStatus();
+  setFaceStatus('生物识别已清除');
+}
+
+// ── Voice Input (Web Speech API) ──────────────────────────────────────────────
+function startVoice() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { alert('此浏览器不支持 Web Speech API（请使用 Chrome）'); return; }
+  if (voiceActive) return;
+
+  voiceRecognition = new SR();
+  voiceRecognition.lang = 'zh-CN';
+  voiceRecognition.continuous = false;
+  voiceRecognition.interimResults = true;
+
+  voiceRecognition.onstart = () => {
+    voiceActive = true;
+    document.getElementById('mic-dot').className = 'mic-dot listening';
+    document.getElementById('voice-state-text').textContent = '正在聆听…';
+    document.getElementById('voice-btn').textContent = '🎤 聆听中';
+  };
+
+  voiceRecognition.onresult = (e) => {
+    const transcript = Array.from(e.results).map(r => r[0].transcript).join('');
+    document.getElementById('voice-transcript').textContent = transcript;
+    document.getElementById('input').value = transcript;
+    if (e.results[e.results.length - 1].isFinal) {
+      // Mark voice verified in biometric signal
+      if (currentBiometric) { currentBiometric.voice_verified = true; updateBioStatus(); }
+      send();
+    }
+  };
+
+  voiceRecognition.onend = () => {
+    voiceActive = false;
+    document.getElementById('mic-dot').className = 'mic-dot';
+    document.getElementById('voice-state-text').textContent = '已停止';
+    document.getElementById('voice-btn').textContent = '🎤 开始聆听';
+  };
+
+  voiceRecognition.onerror = (e) => {
+    voiceActive = false;
+    document.getElementById('voice-state-text').textContent = '错误：' + e.error;
+  };
+
+  voiceRecognition.start();
+}
+
+function toggleVoice() {
+  if (voiceActive) stopVoice(); else startVoice();
+}
+
+function stopVoice() {
+  if (voiceRecognition) { try { voiceRecognition.stop(); } catch {} voiceRecognition = null; }
+  voiceActive = false;
+  document.getElementById('mic-dot').className = 'mic-dot';
+  document.getElementById('voice-state-text').textContent = '未激活';
+  document.getElementById('voice-btn').textContent = '🎤 开始聆听';
+}
+
+// ── TTS: speak agent responses in kiosk mode ──────────────────────────────────
+function speakIfKiosk(text) {
+  if (!kioskActive || !window.speechSynthesis) return;
+  // Only speak short messages (avoid reading long tool outputs)
+  if (text.length > 120) return;
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'zh-CN';
+  utterance.rate = 1.1;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+}
+
+// Patch addBubble to speak agent messages in kiosk mode
+const _origAddBubble = addBubble;
+// Override in-place: when kiosk is active and role=agent, speak the final text
+// (done after stream completes via hooking the text event handler)
+
+// ── Override send() to include biometric ────────────────────────────────────
+// Patch the fetch call in send() to add biometric + user_id from face recognition.
+// We do this by wrapping the global fetch for /api/chat and /api/confirm-payment.
+const _origFetch = window.fetch;
+window.fetch = function(url, opts) {
+  if (typeof url === 'string' && opts?.body) {
+    const apiUrl = AGENT_BASE + '/api/chat';
+    const confirmUrl = AGENT_BASE + '/api/confirm-payment';
+    if (url === apiUrl || url === confirmUrl) {
+      try {
+        const body = JSON.parse(opts.body);
+        if (currentBiometric) body.biometric = { ...currentBiometric };
+        if (currentUserId !== 'guest') body.user_id = currentUserId;
+        opts = { ...opts, body: JSON.stringify(body) };
+      } catch {}
+    }
+  }
+  return _origFetch.call(this, url, opts);
+};
+</script>
+</body>
+</html>
