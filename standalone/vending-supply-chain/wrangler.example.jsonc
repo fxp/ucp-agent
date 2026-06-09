@@ -1,0 +1,23 @@
+{
+  // Rename: cp wrangler.example.jsonc wrangler.jsonc
+  // Fill in account_id and kv_namespaces id before deploying.
+  "name": "vending-supply-chain",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-09-23",
+
+  // Your Cloudflare account ID (wrangler whoami)
+  "account_id": "YOUR_ACCOUNT_ID",
+
+  "kv_namespaces": [
+    {
+      "binding": "SC_KV",
+      // Create with:  wrangler kv namespace create SC_KV
+      "id": "YOUR_KV_NAMESPACE_ID"
+    }
+  ],
+
+  "triggers": {
+    // Run daily auto-order at 02:00 UTC
+    "crons": ["0 2 * * *"]
+  }
+}
