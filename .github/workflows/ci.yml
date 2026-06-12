@@ -33,48 +33,7 @@ jobs:
         run: npx tsc --noEmit
         working-directory: ${{ matrix.worker }}
 
-  # ── Deploy to Cloudflare (runs only on push to main, after typecheck) ──────
-  deploy:
-    name: Deploy → Cloudflare
-    needs: typecheck
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: production
-    concurrency:
-      group: deploy-production
-      cancel-in-progress: false   # never cancel an in-flight deploy
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: |
-            cloudflare/agent-worker/package-lock.json
-            cloudflare/supply-chain-worker/package-lock.json
-
-      - name: Install dependencies
-        run: |
-          npm ci --prefix cloudflare/supply-chain-worker
-          npm ci --prefix cloudflare/agent-worker
-
-      # Deploy supply-chain-mock first — ucp-agent binds to it via Service Binding
-      - name: Deploy supply-chain-mock
-        run: npx wrangler deploy
-        working-directory: cloudflare/supply-chain-worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: Deploy ucp-agent
-        run: npx wrangler deploy
-        working-directory: cloudflare/agent-worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-
-      - name: Smoke test
-        run: |
-          HEALTH=$(curl -sf https://ucp-agent.fxp007.workers.dev/health)
-          echo "$HEALTH"
-          echo "$HEALTH" | grep -q '"ok":true' || (echo "health check failed" && exit 1)
+  # ── Deploy 已退役（2026-06-12）──────────────────────────────────────────────
+  # ucp-agent / supply-chain-mock 旧 demo worker 已删除（被新架构 ADR-14 取代：
+  # ucp-vending-machine + vending-supply-chain）。此 repo 仅保留 typecheck 作参考，
+  # 不再自动部署。如需恢复部署，从 git 历史取回 deploy job。
